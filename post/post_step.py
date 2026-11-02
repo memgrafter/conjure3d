@@ -271,7 +271,7 @@ def process(pid, p, od, dry, extras_key=EXTRAS_KEY):
         chk["passed"] = all(v for k, v in chk.items() if k != "trimesh_bounds_m")
         rec.update(output=dict(file="asset.glb", md5=md5(dst), bytes=os.path.getsize(dst)), checks=chk)
     rec["seconds"] = round(time.time() - t0, 1)
-    rec["peak_rss_mb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1)
+    rec["peak_rss_mb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2 if sys.platform == "darwin" else 1024), 1)  # bytes on macOS, KiB on Linux
     if not dry:
         with open(os.path.join(od, "asset.json"), "w") as f:
             json.dump(rec, f, indent=1)
