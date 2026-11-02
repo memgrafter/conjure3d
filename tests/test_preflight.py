@@ -62,3 +62,23 @@ def test_gpu_numbers_selected_with_cuda_visible_devices_pass():
 
 def test_gpu_numbers_unknown_uuid_warns():
     assert preflight.gpu_number_lines([(0, "GPU-x", "0000:09:00.0")], SMI)[0][0] == "WARN"
+
+
+ALL_TARGETS = "8.0;8.6;8.9;9.0;10.0;12.0+PTX"
+
+
+@pytest.mark.parametrize("arch_list, cap, want", [
+    (ALL_TARGETS, "8.0", True), (ALL_TARGETS, "8.6", True), (ALL_TARGETS, "8.7", True), (ALL_TARGETS, "8.9", True),
+    (ALL_TARGETS, "9.0", True), (ALL_TARGETS, "10.0", True), (ALL_TARGETS, "10.3", True), (ALL_TARGETS, "12.0", True),
+    (ALL_TARGETS, "12.1", True), (ALL_TARGETS, "13.0", True), (ALL_TARGETS, "7.5", False), (ALL_TARGETS, "11.0", False),
+    ("8.6", "8.9", True), ("8.6", "8.0", False), ("8.6", "9.0", False), ("8.6", "12.0", False),
+    ("8.6 8.9", "8.9", True), ("8.6+PTX", "12.0", True), ("9.0a", "9.0", True), ("10.0a", "10.3", False),
+])
+def test_arch_list_runs_on(arch_list, cap, want):
+    assert preflight.arch_list_runs_on(arch_list, cap) is want
+
+
+def test_gpu_outside_the_arch_list_fails(monkeypatch, capsys):
+    monkeypatch.setenv("TORCH_CUDA_ARCH_LIST", "8.6")
+    preflight.check_one_gpu("0", "NVIDIA H100", 79.6, 0.0, "9.0")
+    assert "FAIL  GPU 0: the CUDA code is built for TORCH_CUDA_ARCH_LIST=8.6" in capsys.readouterr().out

@@ -163,12 +163,34 @@ def check_gpu_numbers(cuda, smi):
         say(level, text, fix)
 
 
+def arch_list_runs_on(arch_list, cap):
+    """True if CUDA code built for TORCH_CUDA_ARCH_LIST runs on a GPU of compute capability cap: machine code runs on the
+    same major version with the same or a higher minor version; PTX ("+PTX") also runs on every later version; an
+    arch-specific target ("9.0a") runs only on that version."""
+    want = tuple(int(x) for x in cap.split("."))
+    for entry in re.split(r"[;\s]+", arch_list.strip()):
+        m = re.fullmatch(r"(\d+)\.(\d+)(a?)(\+PTX)?", entry)
+        if not m:
+            continue
+        have = (int(m.group(1)), int(m.group(2)))
+        if m.group(3):
+            if have == want:
+                return True
+        elif (have[0] == want[0] and have[1] <= want[1]) or (m.group(4) and have <= want):
+            return True
+    return False
+
+
 def check_one_gpu(index, name, total_gib, used_gib, cap):
     label = f"GPU {index} {name}, {total_gib:.1f} GiB, compute capability {cap}"
     if not re.fullmatch(r"\d+\.\d+", cap):
         return say("WARN", label, "compute capability unknown: check that CUDA 13 supports this GPU")
     if float(cap) < MIN_COMPUTE_CAP:
         return say("FAIL", label, f"CUDA 13 does not support GPUs under compute capability {MIN_COMPUTE_CAP}")
+    arch_list = os.environ.get("TORCH_CUDA_ARCH_LIST", "")
+    if arch_list and not arch_list_runs_on(arch_list, cap):
+        say("FAIL", f"GPU {index}: the CUDA code is built for TORCH_CUDA_ARCH_LIST={arch_list}, which does not run on "
+            f"compute capability {cap}", f"build again with {cap} in TORCH_CUDA_ARCH_LIST (docs/CONTAINER.md)")
     if cap != TESTED["compute_cap"]:
         say("WARN", f"GPU {index}: compute capability {cap}",
             f"this GPU generation is not tested (tested: {TESTED['compute_cap']}, RTX 3090 and 3090 Ti)")
