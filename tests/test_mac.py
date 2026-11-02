@@ -196,3 +196,8 @@ def test_backend_trellis_cpp_oom_offers_a_draft_on_the_same_route(mac, capsys, m
     assert mac_cli(tmp_path) == cli_module.EXIT_OOM
     out = capsys.readouterr().out
     assert "--backend trellis-cpp --profile draft" in out and "--chunk-norm" not in out
+
+
+def test_seed_0_stops_because_trellis_cpp_makes_it_random():
+    with pytest.raises(SystemExit, match="random seed"):
+        run_mac.main(["--job", "p.json:g:o", "--seed", "0"])

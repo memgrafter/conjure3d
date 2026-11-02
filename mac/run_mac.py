@@ -120,6 +120,8 @@ def main(argv=None):
     ap.add_argument("--device", default="", help="cut-out device: mps (default when available) or cpu")
     ap.add_argument("--cut-root", default="", help="use CUT_ROOT/<id>/cut.png (e.g. the CUDA route's) instead of making a cut-out")
     a = ap.parse_args(argv)
+    if a.seed <= 0:   # trellis-cli: seed 0 = a random seed (trellis_cli.cpp); negative values wrap
+        raise SystemExit("STOP: trellis.cpp treats --seed 0 as 'pick a random seed'; use a seed of 1 or more")
     home, gdir = os.environ.get("TRELLIS_CPP_HOME", ""), os.environ.get("TRELLIS_GGUF", "")
     if not home or not gdir or not os.environ.get("T2_SRC") or not os.environ.get("HF_HOME"):
         raise SystemExit("STOP: set TRELLIS_CPP_HOME, TRELLIS_GGUF, T2_SRC and HF_HOME (config.example.env, Apple block)")
@@ -170,8 +172,9 @@ def main(argv=None):
         cut_png, info = os.path.join(od, "cut.png"), cuts[pid]
         tglb = os.path.join(tdir, f"{pid}.glb")
         code, wall, rss, text, args = run_trellis(cli, cut_png, tglb, gdir, a.seed, prof, os.path.join(tdir, "trellis-cli.log"))
+        used = re.search(r"generating model with seed (\d+)", text)
         rec = dict(prop=pid, backend="trellis-cpp", experimental=True, gold=p["gold"], gold_md5=info.pop("gold_md5"),
-                   seed=a.seed, profile=dict(name=a.profile, **prof), pipeline_type=f"trellis.cpp --res {prof['res']}",
+                   seed=int(used.group(1)) if used else None, profile=dict(name=a.profile, **prof), pipeline_type=f"trellis.cpp --res {prof['res']}",
                    export=dict(texture_size=prof["atlas"], decimation_target=prof["faces"]), export_note="as configured",
                    model=f"microsoft/TRELLIS.2-4B@{run.HF_REV} (converted to GGUF f16/f32)", code=None,
                    trellis_cpp=dict(tc, args=args), gguf=ggufs, cutout=dict(cut_load, **info), gpu=f"{mach['chip']} (Metal)",
