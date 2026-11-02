@@ -196,16 +196,17 @@ def report_log(path):
     images = sorted(set(re.findall(r"(?:FROM|load metadata for) (\S+@sha256:[0-9a-f]{64}|\S+:\S+)", log)))
     out += ["Images:"] + [f"- {i}" for i in images] + [""]
     apt_hosts = collections.Counter(re.findall(r"Get:\d+ (https?://[^/\s]+/\S*)", log))
-    debs = re.findall(r"Get:\d+ \S+ \S+ amd64 (\S+) amd64 (\S+)", log)
+    debs = re.findall(r"Get:\d+ \S+ \S+ \S+ (\S+) (?:amd64|arm64|all) (\S+) \[", log)
     out += [f"apt: {sum(apt_hosts.values())} index or package downloads, {len(debs)} packages"]
     out += [f"- {u}: {n}" for u, n in sorted(apt_hosts.items())] + [""]
     pins = re.findall(r"PIN (\S+) ([0-9a-f]{40})", log)
     out += ["git clones (setup.sh PIN lines; submodules are fetched by the same clone):"]
     out += [f"- {name} {sha}" for name, sha in pins] or ["- none"]
-    pkgs = sorted(set(re.findall(r"^#\d+ [\d.]+\s+\+ (\S+==\S+|\S+ @ \S+)", log, re.M)))
+    pkgs = sorted(set(re.findall(r"^#\d+ [\d.]+\s+\+ (\S+==\S+(?: \(from \S+\))?)", log, re.M)))
+    sourced = [p for p in pkgs if "(from " in p]
     out += ["", f"Python packages installed by uv: {len(pkgs)}"]
-    out += [f"- {p}" for p in pkgs if " @ " in p]
-    out += [f"- {len([p for p in pkgs if '==' in p])} packages pinned with ==version (requirements.txt)"]
+    out += [f"- {p}" for p in sourced]
+    out += [f"- {len(pkgs) - len(sourced)} more from the package indexes, pinned with ==version (requirements.txt)"]
     py = sorted(set(re.findall(r"Installed Python (\S+)", log)))
     out += [f"- Python: {', '.join(py) or 'not seen in the log'}"]
     return out
