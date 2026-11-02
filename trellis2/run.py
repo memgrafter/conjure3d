@@ -32,6 +32,16 @@ Warm runs (RAM): upstream's low_vram mode moves each model to the GPU for its st
 which allocates new host memory for every weight each time. --offload persistent (default) keeps ONE host copy of
 every weight for the whole process: moving to the GPU copies from it, moving back only drops the GPU copy. After each
 object, glibc's malloc_trim gives free heap pages back to the OS.
+--offload resident: every model (and BiRefNet) is copied to the GPU once at load and stays there; moving back does
+nothing and the host copy (memory map or private copy) is freed, so the process keeps no host weights (draft: 11.2 GB
+of GPU memory). TRELLIS.2 still runs its low_vram code path, so the computation is the same. --inflight N (needs
+--offload resident): N objects at a time in one process, on N worker threads that share the GPU weights; each thread
+claims its own objects. Same bytes as one at a time: in a worker thread torch.manual_seed seeds a per-thread
+generator and torch.randn (TRELLIS.2's noise, on the CPU) draws from it; get_cond, decode_latent and the cascade's
+shape sampling (they set shared model attributes) run one thread at a time, and so do the cut-out, get_cond and the
+sparse-structure decoder, because the cut-out turns cuDNN's TF32 off for the whole process while it runs and the
+other two use cuDNN in fp32. All threads use the default CUDA stream. GPU peaks in record.json are then device-wide
+for all objects in flight.
 
 Weights: TRELLIS.2 and DINOv3 load from a local copy (WEIGHT_FILES, made by setup.sh weights with --install-weights;
 --weights, default $T2_WEIGHTS); every file's SHA-256 is checked at start.
@@ -64,7 +74,7 @@ default and gives the same bytes as runs before profiles existed. --pipeline-typ
 Measured per object: seconds and process RSS after every stage (stages.jsonl), the bake's rasterize/interpolate time,
 GPU memory peaks (device-wide, sampled every 0.2 s), torch allocator peaks.
 """
-import argparse, ctypes, gc, hashlib, importlib.util, json, math, os, resource, shutil, struct, subprocess, sys, threading, time
+import argparse, contextlib, ctypes, gc, hashlib, importlib.util, json, math, os, resource, shutil, struct, subprocess, sys, threading, time
 from importlib import metadata
 
 T2_SHA = "75fbf0183001ed9876c8dbb35de6b68552ee08bd"
@@ -260,8 +270,8 @@ def sha256(path):
 
 class BiRefNetCutout:
     """The pinned BiRefNet general model and the largest-piece rule. Weights stay on the host between props (one copy,
-    persistent_offload); each cut-out moves them to the GPU and back."""
-    def __init__(self, src_root, torch):
+    persistent_offload); each cut-out moves them to the GPU and back. resident: they stay on the GPU."""
+    def __init__(self, src_root, torch, resident=False):
         self.torch = torch
         root = os.path.join(src_root, "ext", "BiRefNet")
         git = lambda *a: subprocess.run(["git", "-C", root, *a], capture_output=True, text=True, check=True).stdout.strip()
@@ -290,7 +300,7 @@ class BiRefNetCutout:
         from safetensors.torch import load_file
         model.load_state_dict(load_file(weights), strict=True)
         self.model = model.eval()
-        self.host_bytes = persistent_offload(self.model, torch)
+        self.host_bytes = persistent_offload(self.model, torch, resident)
         self.info = dict(model="BiRefNet general (swin_v1_l backbone)", licence="MIT (code and weights)",
                          code=f"github.com/ZhengPeng7/BiRefNet@{BIREFNET_SHA}", code_path=root,
                          weights=f"{BIREFNET_REPO}@{BIREFNET_REV}/model.safetensors", weights_sha256=BIREFNET_SHA256,
@@ -364,16 +374,28 @@ def heap_gb():
 
 class Stages:
     """Seconds and RSS per stage; stage = a wrapped function. Lines go to stages.jsonl (ts = unix time at the stage
-    end). failures: the innermost stage (with its parents) each exception came out of, e.g. an out-of-memory error."""
+    end). failures: the innermost stage (with its parents) each exception came out of, e.g. an out-of-memory error.
+    prop, acc, stack and failures are per thread (--inflight); lines are written whole under a lock."""
     def __init__(self, torch, path, digest=False):
-        self.torch, self.f, self.prop, self.acc, self.digest = torch, open(path, "a"), None, {}, digest
-        self.stack, self.failures = [], []
+        self.torch, self.f, self.digest = torch, open(path, "a"), digest
+        self.tl, self.write_lock = threading.local(), threading.Lock()
+
+    def _mine(self):
+        if not hasattr(self.tl, "acc"):
+            self.tl.prop, self.tl.acc, self.tl.stack, self.tl.failures = None, {}, [], []
+        return self.tl
+
+    prop = property(lambda self: self._mine().prop, lambda self, v: setattr(self._mine(), "prop", v))
+    acc = property(lambda self: self._mine().acc, lambda self, v: setattr(self._mine(), "acc", v))
+    stack = property(lambda self: self._mine().stack, lambda self, v: setattr(self._mine(), "stack", v))
+    failures = property(lambda self: self._mine().failures, lambda self, v: setattr(self._mine(), "failures", v))
 
     def log(self, stage, dt, **extra):
         free, total = self.torch.cuda.mem_get_info()
         rec = dict(prop=self.prop, stage=stage, s=round(dt, 3), rss_gb=rss_gb(), **mem_status(), **heap_gb(), gpu_used_gb=round((total - free) / 1024 ** 3, 2),
                    torch_reserved_gb=round(self.torch.cuda.memory_reserved() / 1024 ** 3, 2), t=time.strftime("%H:%M:%S"), ts=round(time.time(), 3), **extra)
-        self.f.write(json.dumps(rec) + "\n"); self.f.flush()
+        with self.write_lock:
+            self.f.write(json.dumps(rec) + "\n"); self.f.flush()
         a = self.acc.setdefault(stage, [0.0, 0]); a[0] += dt; a[1] += 1
 
     def wrap(self, owner, name, stage=None, sync=True, digest=False):
@@ -411,8 +433,11 @@ class Stages:
 
 
 def rng_digest(torch):
-    """SHA-256 of torch's CPU and CUDA RNG states (--hash-stages): equal before a stage = the same random draws follow."""
-    return hashlib.sha256(torch.get_rng_state().numpy().tobytes() + torch.cuda.get_rng_state().numpy().tobytes()).hexdigest()
+    """SHA-256 of torch's CPU and CUDA RNG states (--hash-stages): equal before a stage = the same random draws follow.
+    In an --inflight worker thread the CPU state is that thread's generator (thread_rng)."""
+    gen = getattr(_tl, "gen", None)
+    cpu = gen.get_state() if gen is not None else torch.get_rng_state()
+    return hashlib.sha256(cpu.numpy().tobytes() + torch.cuda.get_rng_state().numpy().tobytes()).hexdigest()
 
 
 def token_count(out):
@@ -444,13 +469,15 @@ def output_digest(obj, torch):
     return h.hexdigest()[:16]
 
 
-def persistent_offload(module, torch):
+def persistent_offload(module, torch, resident=False):
     """Replace module.to(device) / module.cpu() with moves that keep one host copy of every weight: to the GPU =
     copy from the host copy; back = drop the GPU copy (weights are never changed at inference). No host memory is
-    allocated after the first call, so the process RSS cannot grow from the low_vram moves."""
+    allocated after the first call, so the process RSS cannot grow from the low_vram moves.
+    resident (--offload resident): the weights go to the GPU now and stay; back does nothing; the host copy is freed."""
     tensors = [t for _, t in module.named_parameters()] + [t for _, t in module.named_buffers()]
     host = [t.data for t in tensors]
     assert all(h.device.type == "cpu" for h in host), "persistent_offload must start from host weights"
+    nbytes = sum(h.numel() * h.element_size() for h in host)
     state = {"dev": "cpu"}
     def to(device=None, *a, **k):
         dev = torch.device(device) if device is not None else torch.device("cpu")
@@ -462,13 +489,79 @@ def persistent_offload(module, torch):
             state["dev"] = str(dev)
         return module
     def cpu():
+        if resident:
+            return module
         for t, h in zip(tensors, host):
             t.data = h
         state["dev"] = "cpu"
         return module
     module.to, module.cpu = to, cpu
     module.cuda = lambda *a, **k: to(torch.device("cuda"))
-    return sum(h.numel() * h.element_size() for h in host)
+    if resident:
+        to(torch.device("cuda"))
+        host.clear()
+    return nbytes
+
+
+_tl = threading.local()   # --inflight: per worker thread: rng (bool), gen (torch.Generator)
+
+
+def thread_rng(torch):
+    """--inflight: in a worker thread (_tl.rng set) torch.manual_seed seeds that thread's own CPU generator and
+    torch.randn without a generator draws from it, so objects in flight do not share one random stream. The same seed
+    gives the same values as the global generator. Elsewhere both behave as before."""
+    seed0, randn0 = torch.manual_seed, torch.randn
+    def manual_seed(seed):
+        if getattr(_tl, "rng", False):
+            _tl.gen = torch.Generator().manual_seed(int(seed))
+            return _tl.gen
+        return seed0(seed)
+    def randn(*args, **kwargs):
+        gen = getattr(_tl, "gen", None)
+        if gen is not None and kwargs.get("generator") is None and torch.device(kwargs.get("device") or "cpu").type == "cpu":
+            kwargs["generator"] = gen
+        return randn0(*args, **kwargs)
+    torch.manual_seed, torch.randn = manual_seed, randn
+
+
+def run_inflight(a, jobs, one):
+    """--inflight N: N worker threads call one(item). With --queue each thread claims for itself (its own queue_items:
+    a job moves to done/ when that thread asks for its next one); with --job they share one list. An error in a
+    thread stops the others after their current object; then it is raised here."""
+    shared, items_lock = job_items(jobs, a.only), threading.Lock()
+    stop, errors = threading.Event(), []
+    def worker():
+        _tl.rng = True
+        mine = queue_items(a.queue, a.stream) if a.queue else None
+        try:
+            while not stop.is_set():
+                if mine is not None:
+                    item = next(mine, None)
+                else:
+                    with items_lock:
+                        item = next(shared, None)
+                if item is None:
+                    return
+                one(*item)
+        except BaseException as e:
+            errors.append(e)
+            stop.set()
+    threads = [threading.Thread(target=worker, name=f"inflight{k}") for k in range(a.inflight)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    if errors:
+        raise errors[0]
+
+
+def one_at_a_time(owner, name, lock):
+    """owner.name runs under lock (outermost, so stage timers do not count the wait)"""
+    fn = getattr(owner, name)
+    def locked(*args, **kwargs):
+        with lock:
+            return fn(*args, **kwargs)
+    setattr(owner, name, locked)
 
 
 def install_weights(dest, hf_home):
@@ -826,7 +919,10 @@ def build_parser():
     ap.add_argument("--only", default="", help="comma list of prop ids (any job)")
     ap.add_argument("--texture-size", type=int, default=None)
     ap.add_argument("--bake", default="uvrast", choices=["uvrast"], help="uvrast (MIT); nvdiffrast is not supported")
-    ap.add_argument("--offload", default="persistent", choices=["persistent", "upstream"])
+    ap.add_argument("--offload", default="persistent", choices=["persistent", "resident", "upstream"],
+                    help="persistent: one host copy, each model on the GPU for its stage; resident: all weights stay on the GPU, no host copy")
+    ap.add_argument("--inflight", type=int, default=1, metavar="N",
+                    help="objects at a time in this process (worker threads sharing the GPU weights); N > 1 needs --offload resident")
     ap.add_argument("--bvh", default="ours", choices=["ours"],
                     help="ours: trianglebvh (clean-room, MIT); CuMesh's cubvh is not offered (NVIDIA non-commercial licence)")
     ap.add_argument("--trim", default="on", choices=["on", "off"], help="malloc_trim(0) after each prop")
@@ -865,6 +961,10 @@ def parse_args(argv=None):
     a.profile_record = dict(name=a.profile, values={k: getattr(a, k) for k in PROFILES[a.profile]}, overridden=overridden)
     if a.chunk_norm < 0:
         ap.error("--chunk-norm needs 0 (off) or a positive row count")
+    if a.inflight < 1 or (a.inflight > 1 and a.offload != "resident"):
+        ap.error("--inflight needs N >= 1, and N > 1 needs --offload resident")
+    if a.inflight > 1 and (a.cutout_only or a.trace_decode):
+        ap.error("--inflight N > 1 does not combine with --cutout-only or --trace-decode")
     if not a.weights and not a.cutout_only and not a.export_from:
         ap.error("--weights or $T2_WEIGHTS is required (see config.example.env)")
     if a.install_weights:
@@ -890,8 +990,8 @@ def main():
     a = parse_args()
     if a.install_weights:
         return install_weights(a.weights, os.environ["HF_HOME"])
-    if a.host_weights == "mapped" and a.offload != "persistent":
-        raise SystemExit("STOP: --host-weights mapped needs --offload persistent (upstream's offload makes new host copies)")
+    if a.host_weights == "mapped" and a.offload == "upstream":
+        raise SystemExit("STOP: --host-weights mapped needs --offload persistent or resident (upstream's offload makes new host copies)")
     jobs = [j.split(":") for j in a.job]
     nvdiffrast_present = importlib.util.find_spec("nvdiffrast") is not None
     if nvdiffrast_present:
@@ -925,7 +1025,7 @@ def main():
     os.makedirs(logdir, exist_ok=True)
     if not a.export_from:
         t = time.time()
-        cutter = BiRefNetCutout(os.path.dirname(t2_src), torch)
+        cutter = BiRefNetCutout(os.path.dirname(t2_src), torch, resident=a.offload == "resident")
         cutout_load = dict(cutter.info, load_s=round(time.time() - t, 1), host_weights_gb=round(cutter.host_bytes / 1024 ** 3, 3))
         print(f"cut-out model loaded: {cutout_load}", flush=True)
     if a.cutout_only:
@@ -1004,12 +1104,14 @@ def main():
     weights.update(host=a.host_weights, mapping=mapping,
                    mapped_gb=round(sum(m["mapped_gb"] for m in mapping), 3), private_gb=round(sum(m["private_gb"] for m in mapping), 3))
     host_bytes = 0
-    if a.offload == "persistent":
-        assert pipe.low_vram, "persistent offload is for low_vram mode"
+    if a.offload in ("persistent", "resident"):
+        assert pipe.low_vram, "persistent and resident offload are for low_vram mode"
         for m in pipe.models.values():
-            host_bytes += persistent_offload(m, torch)
-        host_bytes += persistent_offload(pipe.image_cond_model.model, torch)
+            host_bytes += persistent_offload(m, torch, a.offload == "resident")
+        host_bytes += persistent_offload(pipe.image_cond_model.model, torch, a.offload == "resident")
     pipe.cuda()
+    if a.offload == "resident":   # the host copies (memory maps, private fp32 copies) are no longer referenced
+        gc.collect(); LIBC.malloc_trim(0)
     for n in ("get_cond", "sample_sparse_structure", "sample_shape_slat_cascade", "sample_shape_slat", "sample_tex_slat", "decode_latent"):
         st.wrap(pipe, n, f"gen.{n}", digest=True)
     if a.trace_decode:
@@ -1018,6 +1120,15 @@ def main():
         chunk_norm(torch, a.chunk_norm)
     if a.hash_stages:   # every shape sampling: the 512 pipeline's latent and the cascade's first (512) latent are comparable
         st.wrap(pipe.shape_slat_sampler, "sample", "gen.shape_slat_sampler", digest=True)
+    if a.inflight > 1:   # shared state between objects in flight (module docstring, --inflight)
+        thread_rng(torch)
+        cudnn_lock, decode_lock = threading.RLock(), threading.Lock()
+        one_at_a_time(pipe, "get_cond", cudnn_lock)
+        one_at_a_time(pipe.models["sparse_structure_decoder"], "forward", cudnn_lock)
+        one_at_a_time(pipe, "decode_latent", decode_lock)
+        one_at_a_time(pipe, "sample_shape_slat_cascade", decode_lock)   # clean/best: it switches the shape decoder's low_vram too
+    else:
+        cudnn_lock = contextlib.nullcontext()
     LIBC.malloc_trim(0)
     load_s = time.time() - t
     load = dict(venv=sys.prefix, trellis2_src=t2_src, uvrast=uvrast_info, bvh=bvh_info, cumesh=cumesh_info, cumesh_patched=cumesh_info["cumesh_patched"], remesh=remesh_info,
@@ -1025,28 +1136,32 @@ def main():
                 load_s=round(load_s, 1), gpu_used_peak_gb=round(mon.peak / 1024 ** 3, 2), rss_gb=rss_gb(), rss_peak_gb=rss_peak_gb(),
                 mem=mem_status(), host_weights_gb=round(host_bytes / 1024 ** 3, 2), weights=weights, low_vram=bool(pipe.low_vram),
                 models=sorted(pipe.models), profile=a.profile_record, **(dict(vram_cap=vram_cap) if vram_cap else {}))
+    if a.offload == "resident":   # host_weights_gb above = what moved to the GPU; nothing stays on the host
+        load.update(offload="resident", weights_on_gpu_gb=round((host_bytes + cutter.host_bytes) / 1024 ** 3, 2), inflight=a.inflight)
     st.prop = "_load"; st.log("load", load_s); st.take()
     print(f"loaded in {load_s:.1f}s on {props_info.name} {props_info.uuid}; {load}", flush=True)
     run = dict(args=vars(a), load=load, props=[], started=time.strftime("%Y-%m-%dT%H:%M:%S"))
     json.dump(run, open(os.path.join(logdir, "run.json"), "w"), indent=1)
-    n_done = 0
-    items = queue_items(a.queue, a.stream) if a.queue else job_items(jobs, a.only)
-    for pid, p, gold_root, out in items:
+    n_done, run_lock = 0, threading.Lock()
+
+    def one(pid, p, gold_root, out):
+        nonlocal n_done
         src = os.path.join(gold_root, p["gold"])
         if not os.path.exists(src):
             print(f"{pid}: no gold image {src}; skipped", flush=True)
-            continue
+            return
         od = os.path.join(out, pid)
         os.makedirs(od, exist_ok=True)
         st.prop = pid
         st.take_failures()
         tp = time.time()
         try:
-            img, raw, alpha, cut_info = cutter(Image.open(src).convert("RGB"))
+            with cudnn_lock:
+                img, raw, alpha, cut_info = cutter(Image.open(src).convert("RGB"))
         except RuntimeError as e:
             json.dump(dict(prop=pid, gold=p["gold"], error=str(e)), open(os.path.join(od, "cutout-error.json"), "w"), indent=1)
             print(f"{pid}: SKIPPED, cut-out failed: {e}", flush=True)
-            continue
+            return
         img.save(os.path.join(od, "cut.png")); raw.save(os.path.join(od, "mask-birefnet.png")); alpha.save(os.path.join(od, "mask.png"))
         st.log("cutout", cut_info["seconds"])
         assert not np.all(np.asarray(img)[..., 3] == 255), f"{pid}: cut-out has no alpha"
@@ -1064,7 +1179,7 @@ def main():
             json.dump(err, open(os.path.join(od, f"oom-{a.pipeline_type}.json"), "w"), indent=1)
             print(f"{pid}: OOM {err}", flush=True)
             torch.cuda.empty_cache()
-            continue
+            return
         torch.cuda.synchronize(); t1 = time.time()
         run_peak = dict(gpu_used_peak_gb=round(mon.peak / 1024 ** 3, 2), torch_alloc_peak_gb=round(torch.cuda.max_memory_allocated() / 1024 ** 3, 2),
                         torch_reserved_peak_gb=round(torch.cuda.max_memory_reserved() / 1024 ** 3, 2))
@@ -1090,7 +1205,7 @@ def main():
             print(f"{pid}: SKIPPED {err}", flush=True)
             del mesh
             gc.collect(); torch.cuda.empty_cache()
-            continue
+            return
         torch.cuda.synchronize(); t3 = time.time()
         glb.export(os.path.join(od, "raw.glb"))  # PNG textures (no WebP extension), so every importer reads it
         t4 = time.time()
@@ -1114,6 +1229,8 @@ def main():
             rec["stage_failures"] = failures
         if vram_cap:
             rec["vram_cap"] = vram_cap
+        if a.inflight > 1:   # GPU peaks above are device-wide for every object in flight
+            rec["inflight"] = a.inflight
         del mesh, glb
         torch.cuda.empty_cache()
         rec["rss_end_before_trim_gb"] = rss_gb()
@@ -1123,12 +1240,20 @@ def main():
         rec["heap_end"] = heap_gb()
         rec["mem_end"] = mem_status()
         json.dump(rec, open(os.path.join(od, "record.json"), "w"), indent=1)
-        run["props"].append(dict(prop=pid, out=od, prop_s=rec["prop_s"], model_s=rec["model_s"], glb_s=rec["glb_s"],
-                                 rss_end_gb=rec["rss_end_gb"], rss_peak_gb=rec["rss_peak_gb"]))
-        json.dump(run, open(os.path.join(logdir, "run.json"), "w"), indent=1)
+        with run_lock:
+            run["props"].append(dict(prop=pid, out=od, prop_s=rec["prop_s"], model_s=rec["model_s"], glb_s=rec["glb_s"],
+                                     rss_end_gb=rec["rss_end_gb"], rss_peak_gb=rec["rss_peak_gb"]))
+            json.dump(run, open(os.path.join(logdir, "run.json"), "w"), indent=1)
         print(f"{pid}: prop {rec['prop_s']}s model {t1 - t0:.1f}s glb {t3 - t2:.1f}s faces {n_f}->{rec['glb_faces']} "
               f"rss end {rec['rss_end_gb']} GB (before trim {rec['rss_end_before_trim_gb']}) peak {rec['rss_peak_gb']} GB", flush=True)
-        n_done += 1
+        with run_lock:
+            n_done += 1
+
+    if a.inflight == 1:
+        for item in (queue_items(a.queue, a.stream) if a.queue else job_items(jobs, a.only)):
+            one(*item)
+    else:
+        run_inflight(a, jobs, one)
     mon.run_flag = False
 
 
