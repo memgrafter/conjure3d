@@ -18,10 +18,10 @@ DUMP_IMAGE=conjure3d-netscan-tcpdump
 DUMP_BASE=debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
 [ ! -e "$OUT/build.pcap" ] || { echo "STOP: $OUT/build.pcap exists; use a new OUT_DIR"; exit 2; }
 if docker buildx inspect "$BUILDER" >/dev/null 2>&1; then
-  echo "STOP: builder $BUILDER exists (an earlier run did not finish); remove it: docker buildx rm $BUILDER"; exit 2
+  echo "STOP: builder $BUILDER exists (an earlier run did not finish); remove it: docker buildx rm conjure3d-netscan"; exit 2
 fi
 mkdir -p "$OUT"
-printf 'FROM %s\nRUN apt-get update && apt-get install -y --no-install-recommends tcpdump && rm -rf /var/lib/apt/lists/*\n' \
+printf 'FROM %s\nRUN apt-get update && apt-get install -y --no-install-recommends tcpdump\n' \
   "$DUMP_BASE" | docker build -q -t "$DUMP_IMAGE" - >/dev/null
 # shellcheck disable=SC2086
 docker buildx create --name "$BUILDER" --driver docker-container ${BUILDER_OPTS:-} >/dev/null
@@ -30,7 +30,7 @@ cleanup() {
   if [ -n "$DUMP" ]; then
     docker kill -s INT "$BUILDER-tcpdump" >/dev/null 2>&1 || true; wait "$DUMP" 2>/dev/null || true; DUMP=
   fi
-  docker buildx rm "$BUILDER" >/dev/null 2>&1 || true
+  docker buildx rm conjure3d-netscan >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 docker buildx inspect --bootstrap "$BUILDER" >/dev/null
