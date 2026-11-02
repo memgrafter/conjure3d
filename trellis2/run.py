@@ -1123,8 +1123,7 @@ def main():
     if a.inflight > 1:   # shared state between objects in flight (module docstring, --inflight)
         thread_rng(torch)
         if os.environ.get("ATTN_BACKEND") == "xformers":
-            # TRELLIS.2 imports it at the first attention call; done here once, so two threads never load it at the same
-            # time (first GPU try: one thread's read of xformers/__init__.py from the network share failed with EPERM)
+            # TRELLIS.2 imports it at the first attention call; done here once, so two threads never load it at the same time
             import xformers.ops   # noqa: F401
         cudnn_lock, decode_lock = threading.RLock(), threading.Lock()
         one_at_a_time(pipe, "get_cond", cudnn_lock)
