@@ -206,7 +206,8 @@ def report_log(path):
     sourced = [p for p in pkgs if "(from " in p]
     out += ["", f"Python packages installed by uv: {len(pkgs)}"]
     out += [f"- {p}" for p in sourced]
-    out += [f"- {len(pkgs) - len(sourced)} more from the package indexes, pinned with ==version (requirements.txt)"]
+    out += [f"- {len(pkgs) - len(sourced)} more from the package indexes, pinned by version and file SHA-256 "
+            "(trellis2/requirements-*.lock, --require-hashes)"]
     py = sorted(set(re.findall(r"Installed Python (\S+)", log)))
     out += [f"- Python: {', '.join(py) or 'not seen in the log'}"]
     return out
