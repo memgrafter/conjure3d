@@ -1,7 +1,13 @@
 # The 3D stage of this repository in a container: trellis2/setup.sh env runs during the image build, so nothing
 # compiles on the machine that runs the container. The weights are not in the image: DINOv3 is gated, so you log in
 # to Hugging Face and download the weights yourself into a folder you mount at /data. Steps: docs/CONTAINER.md.
-#   docker build -t conjure3d:local --build-arg TORCH_CUDA_ARCH_LIST=8.6 .
+#   docker build -t conjure3d:local --build-arg TORCH_CUDA_ARCH_LIST=8.6 --build-context trianglebvh=PATH/TO/trianglebvh .
+
+# trianglebvh (the GLB export's BVH) is not published yet: give a git clone of it as the build context "trianglebvh"
+# (it must hold the commit that setup.sh pins). Once it is published, use --build-arg TRIANGLEBVH_GIT=<its git URL>
+# instead, and this stage stays empty.
+FROM scratch AS trianglebvh
+
 # CUDA 13.3.0 toolkit (the version the work-identical checks used), Ubuntu 24.04, pinned by digest
 FROM nvidia/cuda:13.3.0-devel-ubuntu24.04@sha256:ef2203909e80b8b976cfc672f7e2ae2b00bc0e25c404ee86d89e10a3802f1c52
 
@@ -27,7 +33,16 @@ WORKDIR /opt/conjure3d/repo
 
 # setup.sh env needs only trellis2/; copied first so that changes elsewhere do not rebuild the environment
 COPY trellis2/ trellis2/
-RUN --mount=type=cache,target=/var/cache/uv setsid -w bash trellis2/setup.sh env
+# Rust 1.97.1 (the version setup was tested with; official image, pinned by digest) builds trianglebvh. It is mounted
+# only for this step, so it is not in the image. trianglebvh's crate has no dependencies, and cargo runs offline.
+ARG TRIANGLEBVH_GIT=file:///opt/conjure3d/trianglebvh
+RUN --mount=type=cache,target=/var/cache/uv \
+    --mount=type=bind,from=trianglebvh,target=/opt/conjure3d/trianglebvh \
+    --mount=type=bind,from=rust:1.97.1-slim-trixie@sha256:8e8cf8f7fd54a2d23d5a743b3a03f56e26b6c774276c33fa0595111704ebb15c,source=/usr/local,target=/opt/rust,rw \
+    if [ "$TRIANGLEBVH_GIT" = file:///opt/conjure3d/trianglebvh ] && [ ! -d /opt/conjure3d/trianglebvh/.git ]; then \
+      echo "STOP: give trianglebvh's git repository: --build-context trianglebvh=PATH/TO/trianglebvh"; exit 1; fi && \
+    PATH=/opt/rust/cargo/bin:$PATH RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo \
+    TRIANGLEBVH_GIT=$TRIANGLEBVH_GIT setsid -w bash trellis2/setup.sh env
 
 COPY . .
 # CUDA numbers the GPUs in PCI bus order, the same order as nvidia-smi (CUDA's default is fastest first)
