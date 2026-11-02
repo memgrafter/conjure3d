@@ -107,6 +107,8 @@ def tls_sni(payload):
             etype, elen = struct.unpack(">HH", payload[pos:pos + 4])
             if etype == 0:
                 nlen = struct.unpack(">H", payload[pos + 7:pos + 9])[0]
+                if pos + 9 + nlen > len(payload):   # the ClientHello goes on in the next TCP segment
+                    return None
                 return payload[pos + 9:pos + 9 + nlen].decode("ascii", "replace").lower()
             pos += 4 + elen
     except (IndexError, struct.error):

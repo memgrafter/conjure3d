@@ -58,3 +58,9 @@ def test_report_names_connections(tmp_path):
     assert "| files.example.org | TLS SNI | 443 | 93.184.216.34 | 1 |" in text
     assert "| example.org | DNS | 80 | 93.184.216.34 | 1 |" in text
     assert "archive.example /ubuntu/pool/... : 1 requests" in text
+
+
+def test_sni_cut_at_the_segment_end_is_not_used():
+    hello = client_hello("download.pytorch.org")
+    assert netscan.tls_sni(hello) == "download.pytorch.org"
+    assert netscan.tls_sni(hello[:-4]) is None
