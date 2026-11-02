@@ -42,7 +42,7 @@ RUN --mount=type=cache,target=/var/cache/uv \
     if [ "$TRIANGLEBVH_GIT" = file:///opt/conjure3d/trianglebvh ] && [ ! -d /opt/conjure3d/trianglebvh/.git ]; then \
       echo "STOP: give trianglebvh's git repository: --build-context trianglebvh=PATH/TO/trianglebvh"; exit 1; fi && \
     PATH=/opt/rust/cargo/bin:$PATH RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo \
-    TRIANGLEBVH_GIT=$TRIANGLEBVH_GIT setsid -w bash trellis2/setup.sh env
+    TRIANGLEBVH_GIT=$TRIANGLEBVH_GIT SETUP_NO_GPU=1 setsid -w bash trellis2/setup.sh env
 
 COPY . .
 # CUDA numbers the GPUs in PCI bus order, the same order as nvidia-smi (CUDA's default is fastest first)

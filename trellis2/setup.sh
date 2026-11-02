@@ -186,6 +186,12 @@ setup_env() {
     || { echo "STOP: $SRC/ext/BiRefNet is not the clean pinned commit $BIREFNET_SHA"; exit 1; }
   "$PY" -I -c "import importlib.metadata as m; d = m.distribution('uvrast'); print('uvrast', d.version, d.read_text('direct_url.json'))"
   "$PY" -I -c "import importlib.metadata as m, trianglebvh as t; d = m.distribution('trianglebvh'); print('trianglebvh', d.version, d.read_text('direct_url.json'), 'library sha256', t.library_sha256(), 'simd', bool(t._load().tb_simd()))"
+  if [ "${SETUP_NO_GPU:-0}" = 1 ]; then
+    # an image build has no GPU (Dockerfile), and flex_gemm reads the GPU's name when it is imported; run.py makes the
+    # CuMesh and trianglebvh checks below at each start
+    echo "GPU CHECKS SKIPPED (SETUP_NO_GPU=1): imports and the runner's CuMesh and trianglebvh checks; run.py makes them at each start"
+    return
+  fi
   "$PY" -I -c "import uvrast; uvrast.install(); import torch, xformers, flex_gemm, cumesh, o_voxel, trellis2, einops, kornia, timm; print('import ok', torch.__version__, torch.version.cuda, trellis2.__file__)"
   # the runner's own CuMesh and lean-remesh checks (stop if CuMesh is not the patched build)
   "$PY" -I - "$RUN" <<'EOF'
