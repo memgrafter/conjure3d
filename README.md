@@ -82,6 +82,8 @@ Hard objects on an RTX 3090 / 3090 Ti at 275 W (warm process, model load of 33-6
 - Bytes match only on the same GPU model. An RTX 3090 and an RTX 3090 Ti give different files from the same input.
 - Linux and NVIDIA only (CUDA 13 build). Only one machine was tested; other GPUs, drivers and CUDA versions are
   untested. Some very detailed objects run out of memory even on 24 GB.
+- Apple Silicon: an experimental route with trellis.cpp on Metal (`conjure3d.py --backend trellis-cpp`,
+  [docs/MAC.md](docs/MAC.md)). Not production, and not the same files as the CUDA route.
 
 ## Measured
 
