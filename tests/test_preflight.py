@@ -17,7 +17,7 @@ def test_driver_cuda_version(header, want):
 
 def test_profile_advice_follows_measured_results():
     assert preflight.profile_advice(24564 / 1024)[0] == "PASS"
-    assert "6 of 10" in preflight.profile_advice(16376 / 1024)[1]
+    assert "6 of 11" in preflight.profile_advice(16376 / 1024)[1]
     assert "6 of 6" in preflight.profile_advice(12282 / 1024)[1] and "6 of 6" in preflight.profile_advice(8188 / 1024)[1]
     assert "under 8 GB is not tested" in preflight.profile_advice(6144 / 1024)[1]
 

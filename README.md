@@ -35,7 +35,7 @@ close-ups.
 | Profile | Mesh resolution | Textures | Faces | GPU memory, peak seen | Fits |
 |---|---|---|---|---|---|
 | draft | 512 | 1024 px | 100k | 4.7-7.1 GiB (hard objects) | 16 GB: 8 of 8 (512 mesh, 4096 px). 8 GB: 6 of 6 |
-| clean (default) | 1024 (`1024_cascade`) | 4096 px | 500k | 16.5-23.6 GiB (11 hard objects) | 24 GB: 11 of 11. 16 GB: 6 of 10 hard objects, 9 of 10 with `--chunk-norm` |
+| clean (default) | 1024 (`1024_cascade`) | 4096 px | 500k | 16.5-23.6 GiB (11 hard objects) | 24 GB: 11 of 11. 16 GB: 6 of 11 hard objects, 9 of 11 with `--chunk-norm` |
 | best | 1536 (`1536_cascade`) | 4096 px | 500k | up to 23.3 GiB | see below |
 
 Hard objects on an RTX 3090 / 3090 Ti at 275 W (warm process, model load of 33-64 s not included):
@@ -50,8 +50,8 @@ Hard objects on an RTX 3090 / 3090 Ti at 275 W (warm process, model load of 33-6
 - The 16 GB failures happen in the decoders, which work on every voxel at 1024 at once. That memory is in use,
   not only held by the cache.
 - `--chunk-norm` (`run.py --chunk-norm 1048576` or `conjure3d.py --chunk-norm`) runs the decoders' normalization on
-  1048576 rows at a time. It gives the same bytes and a lower decode peak. With it, clean made 9 of the 10 hard
-  objects under the 16 GB cap (6 without); a wicker hamper still ran out of memory (RTX 3090 and 3090 Ti, 250 W).
+  1048576 rows at a time. It gives the same bytes and a lower decode peak. With it, clean made 9 of the 11 hard
+  objects under the 16 GB cap (6 without); a wicker hamper and a capstan still ran out of memory (RTX 3090 and 3090 Ti, 250 W).
   It is off by default.
 - To run only the GLB export again, save the decoded meshes with `run.py --save-mesh DIR`, then run
   `run.py --export-from DIR/<id>.pt --export-out OUT`. The GLB is the same as the full run's (2 objects, RTX 3090).

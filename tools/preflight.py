@@ -64,7 +64,7 @@ def profile_advice(vram_gib):
         return "PASS", ("clean (the default) fits: 11 of 11 hard objects on 24 GB. A few very detailed objects ran out "
                         "of memory even on 24 GB")
     if vram_gib >= 15:
-        return "WARN", ("16 GB class: clean ran 6 of 10 hard objects under a 15.70 GiB limit, draft 8 of 8. Start with "
+        return "WARN", ("16 GB class: clean ran 6 of 11 hard objects under a 15.70 GiB limit, draft 8 of 8. Start with "
                         "clean; after an out-of-memory error use --profile draft")
     if vram_gib >= 7.5:
         return "WARN", ("under 16 GB: draft ran 6 of 6 hard objects under a 7.63 GiB limit (an 8 GB card); clean under 16 GB "

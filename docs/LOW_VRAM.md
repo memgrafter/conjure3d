@@ -92,9 +92,9 @@ ran second in its process (warm); model load not included. Power limit per row.
   copies are not made at once. The norm works per row, so the bytes do not change: with 1048576 rows, one object's
   decode output and GLB were identical to the run without it (RTX 3090, no cap), and so were the GLBs of the 3
   objects that passed under the cap. It lowered the last up block's torch peak by 0.96 GiB in each decoder on that
-  object; the block's other large tensors stay. **Clean under the 15.70 GiB cap: 9 of 10 hard objects with
-  `--chunk-norm`, 6 of 10 without.** The wicker hamper (20.1M voxels at 1024) still ran out of memory in
-  `decode_latent` (it asked for 2.02 GiB more).
+  object; the block's other large tensors stay. **Clean under the 15.70 GiB cap: 9 of 11 hard objects with
+  `--chunk-norm`, 6 of 11 without.** The wicker hamper (20.1M voxels at 1024) still ran out of memory in
+  `decode_latent` (it asked for 2.02 GiB more), and so did the capstan (0.90 GiB more).
 - Peaks in the passing runs, generation / export: clean under the cap 15.43-15.69 / 9.25-11.64 GiB; 512 at 4096 px
   4.72-7.05 / 4.28-5.68 GiB; draft under the 7.63 GiB cap 4.72-7.05 / 2.75-3.32 GiB.
 - 7.63 GiB is what an 8 GB card such as an RTX 4060 or RTX 3070 shows to CUDA under Linux (7.63-7.79 GiB).
@@ -124,7 +124,7 @@ HF_HUB_OFFLINE=1 ATTN_BACKEND=xformers PYTORCH_CUDA_ALLOC_CONF=expandable_segmen
 - Nothing else may use the GPU: no image stage, no desktop session on that card if you can avoid it. Run the image
   stage (FLUX.2-klein-4B, 15.9 GB resident on the GPU) in its own process, before or after, never next to the 3D stage.
 - An object that runs out of memory in generation writes `out/<id>/oom-1024_cascade.json` and the run goes on with the
-  next object. With the 15.70 GiB cap, 4 of 10 hard objects did without `--chunk-norm` and 1 of 10 with it (table
+  next object. With the 15.70 GiB cap, 5 of 11 hard objects did without `--chunk-norm` and 2 of 11 with it (table
   above). Run those objects again with `--profile draft` (fewer details, other bytes).
 
 ## Under 16 GB
