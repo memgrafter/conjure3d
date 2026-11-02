@@ -37,7 +37,8 @@ is no revenue limit in the licence text.
 | CuMesh (JeffreyXiang/CuMesh) + `trellis2/patches/cumesh-deterministic.patch` and `cumesh-no-cubvh.patch` (ours, MIT); built without its cubvh submodule (below) | `12289e10` | MIT, Copyright (c) 2025 Jianfeng XIANG | `LICENSE` in the pinned clone |
 | `trellis2/cumesh_lean_remesh.py`: a copy of CuMesh's `remesh_narrow_band_dc` with `del` statements added | CuMesh `12289e10` | MIT, Copyright (c) 2025 Jianfeng XIANG | as above |
 | xatlas (CuMesh third_party) | CuMesh's copy | MIT, Copyright (c) 2018-2020 Jonathan Young | `third_party/xatlas/LICENSE` |
-| FlexGEMM (JeffreyXiang/FlexGEMM) | `6dd94a85` | MIT, Copyright (c) 2025 Jianfeng Xiang | `LICENSE` in the pinned clone |
+| FlexGEMM (JeffreyXiang/FlexGEMM) + `trellis2/patches/flexgemm-autotuner-threadsafe.patch` (ours, MIT) | `6dd94a85` | MIT, Copyright (c) 2025 Jianfeng Xiang | `LICENSE` in the pinned clone |
+| `tests/fixtures/flexgemm_autotuner_6dd94a85.py`: FlexGEMM's `flex_gemm/utils/autotuner.py`, unchanged (test input for the patch) | FlexGEMM `6dd94a85` | MIT, Copyright (c) 2025 Jianfeng Xiang | as above |
 | BiRefNet code (ZhengPeng7/BiRefNet) | `f7079632` | MIT, Copyright (c) 2024 ZhengPeng | `LICENSE` in the pinned clone |
 | uvrast (memgrafter/uvrast) | `5dcc54a3` | MIT | its `LICENSE` |
 | trianglebvh (clean-room BVH; replaces cubvh in the GLB export; built with cargo, no Rust crates) | `b8ef3415` | MIT | its `LICENSE` at the pinned commit |

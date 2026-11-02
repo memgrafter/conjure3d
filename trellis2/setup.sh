@@ -5,6 +5,7 @@
 #   setsid -w bash trellis2/setup.sh weights   # pinned weight downloads (DINOv3 is gated: accept its licence on
 #                                              # Hugging Face first), local SHA-256-checked copy in $T2_WEIGHTS
 #   setsid -w bash trellis2/setup.sh all       # both
+#   setsid -w bash trellis2/setup.sh flexgemm  # an existing venv: FlexGEMM again from the pinned clone + thread-safety patch
 # Run with setsid so the RAM guard can stop the whole build. No conda, no sudo.
 #
 # env: the venv is built only from scratch (the script stops if $T2_VENV exists). No nvdiffrast, no nvdiffrec, no
@@ -33,13 +34,17 @@
 #   sums chart perimeters in a fixed order, so the same mesh gives the same GLB bytes every run. Checked with
 #   git apply --check (stops if it fails); after the build, $T2_VENV/cumesh-build.json records the commit, the patch
 #   SHA-256 and the SHA-256 of each built binary (run.py checks them).
+# - Local patch: patches/flexgemm-autotuner-threadsafe.patch makes every FlexGEMM autotuner call hold one process-wide
+#   lock (its autotuners keep per-call state on objects all threads share; run.py --inflight N > 1 needs it; see
+#   docs/PATCHES.md). Same checks as the CuMesh patch; $T2_VENV/flexgemm-build.json records the commit, the patch SHA-256
+#   and the SHA-256 of the installed autotuner file (run.py checks them). Mode flexgemm: only this step, in an existing venv.
 # - CuMesh is built without its cubvh submodule (non-commercial NVIDIA licence): patches/cumesh-no-cubvh.patch;
 #   trianglebvh (MIT) gives the BVH that TRELLIS.2's GLB export calls.
 # - TRELLIS.2's own Python package is not installed: a .pth file in the venv puts $T2_SRC/TRELLIS.2 on the path.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 MODE=${1:-}
-case "$MODE" in env|weights|all) ;; *) echo "usage: setup.sh env|weights|all"; exit 2 ;; esac
+case "$MODE" in env|weights|all|flexgemm) ;; *) echo "usage: setup.sh env|weights|all|flexgemm"; exit 2 ;; esac
 : "${T2_VENV:?set T2_VENV (see config.example.env)}" "${T2_SRC:?set T2_SRC}" "${HF_HOME:?set HF_HOME}"
 V=$T2_VENV SRC=$T2_SRC
 PY=$V/bin/python
@@ -55,7 +60,9 @@ CUMESH_NO_CUBVH=$HERE/patches/cumesh-no-cubvh.patch
 CUMESH_NO_CUBVH_SHA256=365bd3713e0a438926dc2693bd50d8387fbe6e0921b818d6993d8f179fa8437a  # = run.py CUMESH_NO_CUBVH_SHA256
 TIL_REV=25e0d31ffbebe4b5a97464dd851910efc3002d96        # microsoft/TRELLIS-image-large (MIT): sparse-structure decoder
 DINO_REV=ea8dc2863c51be0a264bab82070e3e8836b02d51       # facebook/dinov3-vitl16-pretrain-lvd1689m (DINOv3 License)
-FLEXGEMM_SHA=6dd94a859c26ee8246888502eada3dd8ad85532e  # JeffreyXiang/FlexGEMM (MIT)
+FLEXGEMM_SHA=6dd94a859c26ee8246888502eada3dd8ad85532e  # JeffreyXiang/FlexGEMM (MIT), = run.py FLEXGEMM_SHA
+FLEXGEMM_PATCH=$HERE/patches/flexgemm-autotuner-threadsafe.patch
+FLEXGEMM_PATCH_SHA256=dc182f4610002a3761df9ada8ef398a25ae2ce94489df83f19b8a6868ba4aa65  # = run.py FLEXGEMM_PATCH_SHA256
 HF_REV=af44b45f2e35a493886929c6d786e563ec68364d        # microsoft/TRELLIS.2-4B (MIT)
 BIREFNET_SHA=f7079632d681ecf12161fcea8905682934e59e51  # ZhengPeng7/BiRefNet main, 2026-10-25 (MIT): cut-out code
 BIREFNET_REV=e2bf8e4460fc8fa32bba5ea4d94b3233d367b0e4  # HF ZhengPeng7/BiRefNet (general), 2026-02-04 (MIT): weights
@@ -142,6 +149,56 @@ json.dump(dict(commit=commit, patch="patches/cumesh-deterministic.patch", patch_
 print("CuMesh build record", out, so)
 EOF
 }
+# the FlexGEMM source diff, byte for byte as the patch file (= run.py FLEXGEMM_DIFF)
+flexgemm_diff() { git -C "$SRC/ext/FlexGEMM" -c core.quotepath=on diff --no-color --no-ext-diff --no-renames --diff-algorithm=histogram \
+  --abbrev=7 --src-prefix=a/ --dst-prefix=b/ -- flex_gemm; }
+patch_flexgemm() {
+  local f=$SRC/ext/FlexGEMM
+  [ "$(git -C "$f" rev-parse HEAD)" = "$FLEXGEMM_SHA" ] || { echo "STOP: $f is not at $FLEXGEMM_SHA"; exit 1; }
+  [ "$(sha256sum < "$FLEXGEMM_PATCH" | cut -c1-64)" = "$FLEXGEMM_PATCH_SHA256" ] || { echo "STOP: $FLEXGEMM_PATCH is not sha256 $FLEXGEMM_PATCH_SHA256"; exit 1; }
+  if [ "$(flexgemm_diff | sha256sum | cut -c1-64)" != "$FLEXGEMM_PATCH_SHA256" ]; then
+    [ -z "$(flexgemm_diff)" ] || { echo "STOP: $f/flex_gemm has changes that are not the patch"; exit 1; }
+    git -C "$f" apply --check "$FLEXGEMM_PATCH" || { echo "STOP: the FlexGEMM patch does not apply to $FLEXGEMM_SHA"; exit 1; }
+    git -C "$f" apply "$FLEXGEMM_PATCH"
+  fi
+  [ "$(flexgemm_diff | sha256sum | cut -c1-64)" = "$FLEXGEMM_PATCH_SHA256" ] && [ -z "$(git -C "$f" ls-files --others --exclude-standard -- flex_gemm)" ] \
+    || { echo "STOP: $f/flex_gemm is not exactly the pinned commit plus the patch"; exit 1; }
+  git -C "$f" diff --stat -- flex_gemm
+  echo "PATCH FlexGEMM: $(basename "$FLEXGEMM_PATCH") sha256 $FLEXGEMM_PATCH_SHA256"
+}
+flexgemm_record() {  # run.py's FlexGEMM check compares the installed autotuner with this record
+  "$PY" -I - "$SRC/ext/FlexGEMM" "$V/flexgemm-build.json" "$FLEXGEMM_SHA" "$FLEXGEMM_PATCH_SHA256" <<'EOF'
+import hashlib, importlib.util, json, os, sys, time
+src, out, commit, patch = sys.argv[1:5]
+pkg = os.path.dirname(importlib.util.find_spec("flex_gemm").origin)
+tuner = os.path.join(pkg, "utils", "autotuner.py")
+if "_AUTOTUNE_LOCK = threading.RLock()" not in open(tuner).read():
+    sys.exit(f"STOP: {tuner} does not have the thread-safety patch")
+so = {os.path.relpath(os.path.join(d, f), pkg): hashlib.sha256(open(os.path.join(d, f), "rb").read()).hexdigest()
+      for d, _, fs in os.walk(pkg) for f in sorted(fs) if f.endswith(".so")}
+json.dump(dict(commit=commit, patch="patches/flexgemm-autotuner-threadsafe.patch", patch_sha256=patch, source=src, package=pkg,
+               autotuner_sha256=hashlib.sha256(open(tuner, "rb").read()).hexdigest(), so_sha256=so,
+               built=time.strftime("%Y-%m-%dT%H:%M:%S")), open(out, "w"), indent=1)
+print("FlexGEMM build record", out)
+EOF
+}
+flexgemm_check() {  # the runner's own check: stops unless it reports the patched build
+  "$PY" -I - "$RUN" <<'EOF'
+import runpy, sys, flex_gemm.utils.autotuner as tuner
+info = runpy.run_path(sys.argv[1])["flexgemm_provenance"](tuner)
+print("FlexGEMM:", info)
+sys.exit(0 if info["flexgemm_patched"] else "STOP: FlexGEMM is not the patched build")
+EOF
+}
+# mode flexgemm: an existing venv built by this script (e.g. before the patch) gets FlexGEMM from the pinned clone with
+# the patch; nothing else in the venv changes. The clone is $T2_SRC/ext/FlexGEMM (cloned if missing).
+setup_flexgemm() {
+  [ -x "$PY" ] && [ -f "$V/cumesh-build.json" ] || { echo "STOP: $V is not a venv built by setup.sh env"; exit 2; }
+  mkdir -p "$SRC/ext"
+  clone https://github.com/JeffreyXiang/FlexGEMM.git "$SRC/ext/FlexGEMM" $FLEXGEMM_SHA
+  sed -i 's/-std=c++17/-std=c++20/g' "$SRC/ext/FlexGEMM/setup.py"; git -C "$SRC/ext/FlexGEMM" diff --stat -- setup.py
+  patch_flexgemm; build "$SRC/ext/FlexGEMM" flex_gemm; flexgemm_record; flexgemm_check
+}
 
 setup_env() {
   [ ! -e "$V" ] || { echo "STOP: $V exists; the venv is built only from scratch (remove it yourself, or set another T2_VENV)"; exit 2; }
@@ -170,7 +227,7 @@ setup_env() {
   for d in "$SRC/ext/FlexGEMM" "$SRC/ext/CuMesh" "$SRC/TRELLIS.2/o-voxel"; do
     sed -i 's/-std=c++17/-std=c++20/g' "$d/setup.py"; git -C "$d" diff --stat -- setup.py; done
   # CUDA extensions, one at a time, no build isolation (they import torch at build time)
-  "$PY" -I -c "import flex_gemm" 2>/dev/null || build "$SRC/ext/FlexGEMM" flex_gemm
+  "$PY" -I -c "import flex_gemm" 2>/dev/null || { patch_flexgemm; build "$SRC/ext/FlexGEMM" flex_gemm; flexgemm_record; }
   "$PY" -I -c "import cumesh" 2>/dev/null || { patch_cumesh; build "$SRC/ext/CuMesh" cumesh; cumesh_record; }
   "$PY" -I -c "import uvrast; uvrast.install(); import o_voxel" 2>/dev/null || build "$SRC/TRELLIS.2/o-voxel" o_voxel
 
@@ -196,6 +253,7 @@ print("lean remesh:", ns["load_sibling"]("cumesh_lean_remesh").install(cumesh, s
 import trianglebvh
 print("trianglebvh:", ns["trianglebvh_provenance"](trianglebvh))
 EOF
+  flexgemm_check
 }
 
 setup_weights() {
@@ -226,5 +284,6 @@ case "$MODE" in
   env) setup_env ;;
   weights) setup_weights ;;
   all) setup_env; setup_weights ;;
+  flexgemm) setup_flexgemm ;;
 esac
 df -h "$(dirname "$V")"

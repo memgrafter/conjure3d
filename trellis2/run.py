@@ -40,7 +40,9 @@ claims its own objects. Same bytes as one at a time: in a worker thread torch.ma
 generator and torch.randn (TRELLIS.2's noise, on the CPU) draws from it; get_cond, decode_latent and the cascade's
 shape sampling (they set shared model attributes) run one thread at a time, and so do the cut-out, get_cond and the
 sparse-structure decoder, because the cut-out turns cuDNN's TF32 off for the whole process while it runs and the
-other two use cuDNN in fp32. All threads use the default CUDA stream. GPU peaks in record.json are then device-wide
+other two use cuDNN in fp32. FlexGEMM's autotuners keep per-call state on objects all threads share, so N > 1 stops
+unless FlexGEMM was built with FLEXGEMM_PATCH (one lock around every autotuner call; flexgemm_provenance, docs/PATCHES.md;
+record.json "flexgemm" says which build ran). All threads use the default CUDA stream. GPU peaks in record.json are then device-wide
 for all objects in flight.
 
 Weights: TRELLIS.2 and DINOv3 load from a local copy (WEIGHT_FILES, made by setup.sh weights with --install-weights;
@@ -89,10 +91,17 @@ CUMESH_PATCH_SHA256 = "875efddae208bde1351c8061c7f7fb51c90898a89be02f9dacd700cc9
 CUMESH_NO_CUBVH = "patches/cumesh-no-cubvh.patch"
 CUMESH_NO_CUBVH_SHA256 = "365bd3713e0a438926dc2693bd50d8387fbe6e0921b818d6993d8f179fa8437a"
 TRIANGLEBVH_SHA = "b8ef3415f38839f96969417e6a7e311ccfd73bc8"   # trianglebvh (MIT): the BVH of the GLB export
+FLEXGEMM_SHA = "6dd94a859c26ee8246888502eada3dd8ad85532e"      # JeffreyXiang/FlexGEMM (MIT)
+# FlexGEMM's autotuners keep per-call state on objects all threads share; this patch makes every autotuner call hold
+# one process-wide lock (docs/PATCHES.md). --inflight N > 1 stops without it.
+FLEXGEMM_PATCH = "patches/flexgemm-autotuner-threadsafe.patch"
+FLEXGEMM_PATCH_SHA256 = "dc182f4610002a3761df9ada8ef398a25ae2ce94489df83f19b8a6868ba4aa65"
+FLEXGEMM_AUTOTUNER_BLOB = "ca95fc5843ec71ca064e0aa162c327f31b49f822"   # git blob id of flex_gemm/utils/autotuner.py at FLEXGEMM_SHA
 # The patch is `git diff -- src` of the patched clone; this command prints it byte for byte whatever the git config
 # (for example diff.algorithm=histogram). setup.sh uses the same flags.
 CUMESH_DIFF = ["-c", "core.quotepath=on", "diff", "--no-color", "--no-ext-diff", "--no-renames", "--diff-algorithm=histogram",
                "--abbrev=7", "--src-prefix=a/", "--dst-prefix=b/", "--", "src"]
+FLEXGEMM_DIFF = CUMESH_DIFF[:-1] + ["flex_gemm"]   # the FlexGEMM patch is `git diff -- flex_gemm` of the patched clone
 T2_DIR = f"TRELLIS.2-4B@{HF_REV[:8]}"
 DINO_DIR = f"dinov3-vitl16@{DINO_REV[:8]}"
 # The files the 1024_cascade, 1536_cascade and 512 pipelines load, copied to $T2_WEIGHTS by --install-weights: local
@@ -689,6 +698,38 @@ def cumesh_provenance(cumesh):
                 so_sha256=sos, built=rec.get("built"))
 
 
+def flexgemm_provenance(autotuner):
+    """FlexGEMM's thread-safety patch (FLEXGEMM_PATCH), for the imported flex_gemm.utils.autotuner module. Patched only if
+    1. the module has the patch's lock (_AUTOTUNE_LOCK);
+    2. <venv>/flexgemm-build.json (setup.sh writes it right after the build) names FLEXGEMM_SHA and FLEXGEMM_PATCH_SHA256
+       and the SHA-256 of the installed autotuner file, and the file still has it;
+    3. the clone it was installed from (direct_url.json) is at FLEXGEMM_SHA, and its flex_gemm/ diff is exactly the patch.
+    Otherwise flexgemm_patched is False, with the reason. One object at a time does not need the patch (same code path);
+    --inflight N > 1 stops without it (main)."""
+    path = os.path.realpath(autotuner.__file__)
+    info = dict(flexgemm_patched=False, autotuner=path, autotuner_sha256=sha256(path))
+    if not hasattr(autotuner, "_AUTOTUNE_LOCK"):
+        return dict(info, reason="the imported FlexGEMM autotuner has no thread-safety lock (not built with the patch)")
+    rec_path = os.path.join(sys.prefix, "flexgemm-build.json")
+    if not os.path.isfile(rec_path):
+        return dict(info, reason=f"no {rec_path}: FlexGEMM was not built by setup.sh with the patch")
+    rec = json.load(open(rec_path))
+    if rec.get("commit") != FLEXGEMM_SHA or rec.get("patch_sha256") != FLEXGEMM_PATCH_SHA256:
+        return dict(info, reason=f"{rec_path} names commit {rec.get('commit')} / patch {rec.get('patch_sha256')}, not the pins")
+    if rec.get("autotuner_sha256") != info["autotuner_sha256"]:
+        return dict(info, reason=f"the installed {path} is not the file setup.sh built ({rec_path})")
+    url = json.loads(metadata.distribution("flex_gemm").read_text("direct_url.json") or "{}").get("url", "")
+    src = url.removeprefix("file://")
+    if not url.startswith("file://") or src != rec.get("source"):
+        return dict(info, reason=f"FlexGEMM was installed from {url}, not from the clone in {rec_path}")
+    git = lambda *a: subprocess.run(["git", "-C", src, *a], capture_output=True, check=True).stdout
+    if git("rev-parse", "HEAD").decode().strip() != FLEXGEMM_SHA or hashlib.sha256(git(*FLEXGEMM_DIFF)).hexdigest() != FLEXGEMM_PATCH_SHA256 \
+            or git("ls-files", "--others", "--exclude-standard", "--", "flex_gemm").strip():
+        return dict(info, reason=f"the FlexGEMM clone {src} is not {FLEXGEMM_SHA} plus exactly {FLEXGEMM_PATCH}")
+    return dict(info, flexgemm_patched=True, commit=FLEXGEMM_SHA, patch=FLEXGEMM_PATCH, patch_sha256=FLEXGEMM_PATCH_SHA256,
+                source=src, built=rec.get("built"))
+
+
 def trianglebvh_provenance(trianglebvh):
     """The installed trianglebvh distribution: version, git commit (PEP 610 direct_url.json), library SHA-256. Stops on a
     path copy, a library that is not the installed package's, or a commit that is not TRIANGLEBVH_SHA."""
@@ -1017,6 +1058,11 @@ def main():
     import cumesh
     assert o_voxel.postprocess.dr.__name__ == "uvrast", "bake module mismatch"
     cumesh_info = cumesh_provenance(cumesh)   # stops unless CuMesh is the patched build
+    import flex_gemm.utils.autotuner
+    flexgemm_info = flexgemm_provenance(flex_gemm.utils.autotuner)
+    if a.inflight > 1 and not flexgemm_info["flexgemm_patched"]:
+        raise SystemExit(f"STOP: --inflight {a.inflight} needs FlexGEMM built with {FLEXGEMM_PATCH}: {flexgemm_info['reason']} "
+                         "(setup.sh env for a new venv, setup.sh flexgemm for an existing one)")
     remesh_info = load_sibling("cumesh_lean_remesh").install(cumesh, swap=a.remesh == "lean")  # before the stage timers wrap it
     import trianglebvh   # before the stage timers wrap cuBVH
     bvh_info = dict(trianglebvh_provenance(trianglebvh), **trianglebvh.install(cumesh))
@@ -1070,7 +1116,7 @@ def main():
     st.wrap(pp, "grid_sample_3d", "glb.grid_sample_3d")
     st.wrap(pp.cv2, "inpaint", "glb.inpaint", sync=False)
     if a.export_from:
-        provenance = dict(venv=sys.prefix, trellis2_src=t2_src, uvrast=uvrast_info, bvh=bvh_info, cumesh=cumesh_info, remesh=remesh_info,
+        provenance = dict(venv=sys.prefix, trellis2_src=t2_src, uvrast=uvrast_info, bvh=bvh_info, cumesh=cumesh_info, flexgemm=flexgemm_info, remesh=remesh_info,
                           nvdiffrast_present="yes" if nvdiffrast_present else "no", profile=a.profile_record,
                           **(dict(vram_cap=vram_cap) if vram_cap else {}))
         return export_from(a, export, provenance, st, torch, o_voxel)
@@ -1134,7 +1180,8 @@ def main():
         cudnn_lock = contextlib.nullcontext()
     LIBC.malloc_trim(0)
     load_s = time.time() - t
-    load = dict(venv=sys.prefix, trellis2_src=t2_src, uvrast=uvrast_info, bvh=bvh_info, cumesh=cumesh_info, cumesh_patched=cumesh_info["cumesh_patched"], remesh=remesh_info,
+    load = dict(venv=sys.prefix, trellis2_src=t2_src, uvrast=uvrast_info, bvh=bvh_info, cumesh=cumesh_info, cumesh_patched=cumesh_info["cumesh_patched"],
+                flexgemm=flexgemm_info, remesh=remesh_info,
                 cutout=cutout_load, nvdiffrast_present="yes" if nvdiffrast_present else "no",
                 load_s=round(load_s, 1), gpu_used_peak_gb=round(mon.peak / 1024 ** 3, 2), rss_gb=rss_gb(), rss_peak_gb=rss_peak_gb(),
                 mem=mem_status(), host_weights_gb=round(host_bytes / 1024 ** 3, 2), weights=weights, low_vram=bool(pipe.low_vram),
@@ -1219,7 +1266,7 @@ def main():
                    model=f"microsoft/TRELLIS.2-4B@{HF_REV}", code=f"microsoft/TRELLIS.2@{T2_SHA}", licence="MIT (code and weights)",
                    image_cond="facebook/dinov3-vitl16-pretrain-lvd1689m (DINOv3 License)", rembg="TRELLIS.2's own remover: stub, never loaded (briaai/RMBG-2.0 is CC-BY-NC); alpha from our cut-out",
                    bake=f"o_voxel.postprocess.to_glb with {bake}", uvrast=uvrast_info, bvh=bvh_info, cumesh=cumesh_info, cumesh_patched=cumesh_info["cumesh_patched"], remesh=remesh_info,
-                   nvdiffrast_present="yes" if nvdiffrast_present else "no", venv=sys.prefix, offload=a.offload, attention=os.environ.get("ATTN_BACKEND", "flash_attn"),
+                   flexgemm=flexgemm_info, nvdiffrast_present="yes" if nvdiffrast_present else "no", venv=sys.prefix, offload=a.offload, attention=os.environ.get("ATTN_BACKEND", "flash_attn"),
                    profile=a.profile_record, pipeline_type=a.pipeline_type, seed=a.seed, export=dict(export, texture_size=a.texture_size), export_note=export_note,
                    mesh_vertices=n_v, mesh_faces=n_f, glb_vertices=int(len(glb.vertices)), glb_faces=int(len(glb.faces)),
                    frame="raw.glb: glTF Y up (to_glb swaps TRELLIS.2's Z-up frame: y_glb = z, z_glb = -y); object in the [-0.5, 0.5]^3 box",
