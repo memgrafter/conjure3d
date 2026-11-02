@@ -1,0 +1,9 @@
+config.env
+_work/
+web/node_modules/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+/out/
+/data/

@@ -1,0 +1,144 @@
+diff --git a/src/atlas.cu b/src/atlas.cu
+index d48031f..55f7fbe 100644
+--- a/src/atlas.cu
++++ b/src/atlas.cu
+@@ -111,23 +111,40 @@ static __global__ void get_chart_edge_cnt_kernel(
+     const uint64_t* chart_adj,
+     const float* chart_adj_length,
+     const int E,
+-    int* chart2edge_cnt,
+-    float* chart_perim
++    int* chart2edge_cnt
+ ) {
+     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+     if (tid >= E) return;
+ 
+     // get edge
+     uint64_t c = chart_adj[tid];
+-    float l = chart_adj_length[tid];
+     int c0 = int(c >> 32);
+     int c1 = int(c & 0xFFFFFFFF);
+ 
+     // count vertex adjacent edge number
+     atomicAdd(&chart2edge_cnt[c0], 1);
+     atomicAdd(&chart2edge_cnt[c1], 1);
+-    atomicAdd(&chart_perim[c0], l);
+-    atomicAdd(&chart_perim[c1], l);
++}
++
++
++/**
++ * Sum the chart perimeters over the (sorted) chart-edge adjacency, in a fixed order.
++ * A float atomicAdd per edge gave a different rounding every run.
++ */
++static __global__ void get_chart_perim_kernel(
++    const int* chart2edge,
++    const int* chart2edge_offset,
++    const float* chart_adj_length,
++    const int C,
++    float* chart_perim
++) {
++    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
++    if (tid >= C) return;
++    float perim = 0.0f;
++    for (int e = chart2edge_offset[tid]; e < chart2edge_offset[tid+1]; e++) {
++        perim += chart_adj_length[chart2edge[e]];
++    }
++    chart_perim[tid] = perim;
+ }
+ 
+ 
+@@ -389,8 +406,7 @@ static void get_chart_connectivity(
+         mesh.atlas_chart_adj.ptr,
+         mesh.atlas_chart_adj_length.ptr,
+         E,
+-        mesh.atlas_chart2edge_cnt.ptr,
+-        mesh.atlas_chart_perims.ptr
++        mesh.atlas_chart2edge_cnt.ptr
+     );
+     CUDA_CHECK(cudaGetLastError());
+     // 2.2 Prepare CSR format for chart-edge connectivity
+@@ -420,6 +436,15 @@ static void get_chart_connectivity(
+         mesh.atlas_chart2edge_cnt.ptr
+     );
+     CUDA_CHECK(cudaGetLastError());
++    sort_csr_segments(mesh.atlas_chart2edge, mesh.atlas_chart2edge_offset.ptr, C, mesh.cub_temp_storage, stream);
++    get_chart_perim_kernel<<<(C + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
++        mesh.atlas_chart2edge.ptr,
++        mesh.atlas_chart2edge_offset.ptr,
++        mesh.atlas_chart_adj_length.ptr,
++        C,
++        mesh.atlas_chart_perims.ptr
++    );
++    CUDA_CHECK(cudaGetLastError());
+ }
+ 
+ 
+diff --git a/src/connectivity.cu b/src/connectivity.cu
+index de0471e..bbc520a 100644
+--- a/src/connectivity.cu
++++ b/src/connectivity.cu
+@@ -92,6 +92,7 @@ void CuMesh::get_vertex_face_adjacency() {
+         this->vert2face_cnt.ptr
+     );
+     CUDA_CHECK(cudaGetLastError());
++    sort_csr_segments(this->vert2face, this->vert2face_offset.ptr, V, this->cub_temp_storage, stream);
+ }
+ 
+ 
+@@ -368,6 +369,7 @@ void CuMesh::get_vertex_edge_adjacency() {
+         this->vert2edge_cnt.ptr
+     );
+     CUDA_CHECK(cudaGetLastError());
++    sort_csr_segments(this->vert2edge, this->vert2edge_offset.ptr, V, this->cub_temp_storage, stream);
+ }
+ 
+ 
+@@ -571,6 +573,7 @@ void CuMesh::get_vertex_boundary_adjacency() {
+         this->vert2bound_cnt.ptr
+     );
+     CUDA_CHECK(cudaGetLastError());
++    sort_csr_segments(this->vert2bound, this->vert2bound_offset.ptr, V, this->cub_temp_storage, stream);
+ }
+ 
+ 
+diff --git a/src/shared.h b/src/shared.h
+index 70eda3e..453d23a 100644
+--- a/src/shared.h
++++ b/src/shared.h
+@@ -15,6 +15,35 @@ inline cudaStream_t current_stream() {
+ }
+ 
+ 
++/**
++ * Sort the ids inside each segment of a CSR adjacency list (ascending).
++ * The fill kernels claim slots with atomicAdd, so without this the order inside a segment changes from run to run,
++ * and every float sum over a segment (QEM, collapse costs, vertex normals, chart perimeters) changes in the last bits.
++ *
++ * @param data: the CSR ids, shape (offsets[num_segments])
++ * @param offsets: the segment offsets, shape (num_segments + 1)
++ */
++inline void sort_csr_segments(Buffer<int>& data, const int* offsets, size_t num_segments, Buffer<char>& cub_temp_storage, cudaStream_t stream) {
++    size_t N = data.size;
++    if (N == 0 || num_segments == 0) return;
++    int* sorted;
++    CUDA_CHECK(cudaMalloc(&sorted, N * sizeof(int)));
++    size_t temp_storage_bytes = 0;
++    CUDA_CHECK(cub::DeviceSegmentedSort::SortKeys(
++        nullptr, temp_storage_bytes,
++        data.ptr, sorted, N, num_segments, offsets, offsets + 1, stream
++    ));
++    cub_temp_storage.resize(temp_storage_bytes);
++    CUDA_CHECK(cub::DeviceSegmentedSort::SortKeys(
++        cub_temp_storage.ptr, temp_storage_bytes,
++        data.ptr, sorted, N, num_segments, offsets, offsets + 1, stream
++    ));
++    CUDA_CHECK(cudaMemcpyAsync(data.ptr, sorted, N * sizeof(int), cudaMemcpyDeviceToDevice, stream));
++    CUDA_CHECK(cudaStreamSynchronize(stream));
++    CUDA_CHECK(cudaFree(sorted));
++}
++
++
+ template<typename T>
+ __global__ void arange_kernel(T* array, int N, int stride=1) {
+     const int tid = blockIdx.x * blockDim.x + threadIdx.x;

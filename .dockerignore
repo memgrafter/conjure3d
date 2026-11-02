@@ -1,0 +1,8 @@
+.git
+_work
+config.env
+data
+out
+web/node_modules
+**/__pycache__
+.pytest_cache

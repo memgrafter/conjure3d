@@ -1,0 +1,23 @@
+{
+ "note": "Example props file. Each key is an object id; \"gold\" is the reference image path relative to the GOLD_ROOT given to run.py --job PROPS:GOLD_ROOT:OUT. size_m is the real length of the object's longest side in metres (post step). Optional: rest_up / rest_up_why and pose_rule / pose_rule_why (see post/post_step.py); noun, description and material are copied into object.json. Other keys are ignored.",
+ "props": {
+  "oil-lantern": {
+   "gold": "oil-lantern.png",
+   "size_m": 0.35,
+   "noun": "oil lantern",
+   "material": "brass and glass"
+  },
+  "pocket-watch": {
+   "gold": "pocket-watch.png",
+   "size_m": 0.05,
+   "rest_up": [0, 0, 1],
+   "rest_up_why": "lies flat on its back, dial up (TRELLIS.2's front, glTF +Z, points up)"
+  },
+  "hanging-bell": {
+   "gold": "hanging-bell.png",
+   "size_m": 0.4,
+   "pose_rule": "simple",
+   "pose_rule_why": "hangs from a bracket: its placement is not a resting pose"
+  }
+ }
+}

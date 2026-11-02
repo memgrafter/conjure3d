@@ -1,0 +1,16 @@
+{
+  "name": "web-export",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Web export of posed TRELLIS.2 assets: simplified web.glb (KTX2 textures, meshopt) and a baked proxy.glb",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@gltf-transform/core": "4.5.1",
+    "@gltf-transform/extensions": "4.5.1",
+    "@gltf-transform/functions": "4.5.1",
+    "ktx-parse": "1.1.0",
+    "meshoptimizer": "1.2.0",
+    "sharp": "0.35.5"
+  }
+}
