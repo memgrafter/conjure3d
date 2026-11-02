@@ -26,5 +26,6 @@ COPY trellis2/ trellis2/
 RUN --mount=type=cache,target=/var/cache/uv setsid -w bash trellis2/setup.sh env
 
 COPY . .
-ENV PATH=/opt/conjure3d/venv-t2/bin:$PATH
+# CUDA numbers the GPUs in PCI bus order, the same order as nvidia-smi (CUDA's default is fastest first)
+ENV PATH=/opt/conjure3d/venv-t2/bin:$PATH CUDA_DEVICE_ORDER=PCI_BUS_ID
 CMD ["bash"]

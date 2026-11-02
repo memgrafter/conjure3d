@@ -2,12 +2,13 @@
 
   source config.env && python3 -I tools/preflight.py          # setup on this machine (trellis2/setup.sh)
   python3 -I tools/preflight.py --container --data DIR        # the host of the container (docs/CONTAINER.md)
+  python3 -I tools/preflight.py --container --image conjure3d:local   # also: GPU numbers inside the image = host's
 
 Each line starts with PASS, WARN or FAIL. A WARN or FAIL line says what to do. Exit status 1 if any line is FAIL.
 Python 3.8 or newer, standard library only. The Hugging Face token is read from HF_TOKEN, HF_TOKEN_PATH or
 $HF_HOME/token, sent only to huggingface.co, and never printed.
 """
-import argparse, json, os, platform, re, runpy, shutil, subprocess, sys, urllib.error, urllib.request
+import argparse, ctypes, json, os, platform, re, runpy, shutil, subprocess, sys, urllib.error, urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GIB = 2 ** 30
@@ -16,6 +17,7 @@ VENV_GB, SRC_GB = 5.9, 1.3          # trellis2/setup.sh env: venv and pinned sou
 HF_DOWNLOAD_GB = 16.6               # trellis2/setup.sh weights: pinned Hugging Face downloads of the 3D stage
 WEIGHTS_GB = 13.6                   # the local weight copy (run.py --install-weights)
 TESTED = dict(nvcc="13.3", driver="610.43.02", gcc="14.2", uv="0.11.21", compute_cap="8.6", cargo="1.97.1")
+IMAGE_CUDA = (13, 3)                # the container's base image starts only with a driver for CUDA 13.3 or newer
 MIN_COMPUTE_CAP = 7.5               # CUDA 13 has no support for older GPUs (Maxwell, Pascal, Volta)
 RAM_TESTED_GIB = 30                 # the test machine has 31 GB
 RAM_ONE_RUNNER_GB = 19.4            # one runner: 3.6-6.4 GB plus 13 GB of memory-mapped weights (AGENTS.md "Memory")
@@ -74,31 +76,91 @@ def profile_advice(vram_gib):
 
 
 def check_gpus():
-    """Returns the driver's CUDA version (major, minor) or None."""
+    """Returns the driver's CUDA version (major, minor) or None, and nvidia-smi's [(index, UUID, PCI bus id)]."""
     if not shutil.which("nvidia-smi"):
         say("FAIL", "nvidia-smi not found", "install the NVIDIA driver (it includes nvidia-smi)")
-        return None
+        return None, []
     code, header = run(["nvidia-smi"])
     cuda = driver_cuda_version(header) if code == 0 else None
     if cuda is None:
         say("FAIL", f"nvidia-smi does not work: {header.strip().splitlines()[0] if header.strip() else code}",
             "check the NVIDIA driver installation")
-        return None
-    code, out = run(["nvidia-smi", "--query-gpu=index,name,memory.total,memory.used,compute_cap,driver_version",
-                     "--format=csv,noheader,nounits"])
+        return None, []
+    code, out = run(["nvidia-smi", "--query-gpu=index,name,memory.total,memory.used,compute_cap,driver_version,uuid,"
+                     "pci.bus_id", "--format=csv,noheader,nounits"])
     rows = [[c.strip() for c in line.split(",")] for line in out.strip().splitlines()] if code == 0 else []
     if not rows:
         say("FAIL", "no NVIDIA GPU found", "check that the GPU and its driver work: nvidia-smi")
-        return None
+        return None, []
     driver = rows[0][5]
     if cuda < (13, 0):
         say("FAIL", f"driver {driver} supports CUDA {cuda[0]}.{cuda[1]}",
             f"install a driver for CUDA 13 or newer (tested: {TESTED['driver']})")
     else:
         say("PASS", f"driver {driver}, supports CUDA {cuda[0]}.{cuda[1]}")
-    for index, name, total, used, cap, _ in rows:
+    for index, name, total, used, cap, *_ in rows:
         check_one_gpu(index, name, int(total) / 1024, int(used) / 1024, cap)
-    return cuda
+    smi = [(index, uuid, bus_key(bus)) for index, *_, uuid, bus in rows]
+    check_gpu_numbers(cuda_devices(), smi)
+    return cuda, smi
+
+
+def bus_key(bus_id):
+    """A PCI bus id in one form: nvidia-smi writes 00000000:01:00.0, CUDA writes 0000:01:00.0."""
+    domain, rest = bus_id.strip().lower().split(":", 1)
+    return f"{int(domain, 16):04x}:{rest}"
+
+
+def uuid_text(raw):
+    h = bytes(raw).hex()
+    return f"GPU-{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
+
+
+def cuda_devices():
+    """[(CUDA device number, UUID, PCI bus id)] in the order that CUDA programs such as PyTorch use with this
+    environment (CUDA_DEVICE_ORDER, CUDA_VISIBLE_DEVICES). Read from the driver library; None if it cannot be read."""
+    try:
+        cu = ctypes.CDLL("libcuda.so.1")
+    except OSError:
+        return None
+    count = ctypes.c_int()
+    if cu.cuInit(0) or cu.cuDeviceGetCount(ctypes.byref(count)):
+        return None
+    get_uuid = getattr(cu, "cuDeviceGetUuid_v2", None) or cu.cuDeviceGetUuid
+    devices = []
+    for i in range(count.value):
+        dev, raw, bus = ctypes.c_int(), (ctypes.c_ubyte * 16)(), ctypes.create_string_buffer(32)
+        if cu.cuDeviceGet(ctypes.byref(dev), i) or get_uuid(raw, dev) or cu.cuDeviceGetPCIBusId(bus, len(bus), dev):
+            return None
+        devices.append((i, uuid_text(raw), bus_key(bus.value.decode())))
+    return devices
+
+
+def gpu_number_lines(cuda, smi, visible=None):
+    """(level, text, fix) per CUDA device: which nvidia-smi GPU it is. smi: [(index, UUID, PCI bus id)]."""
+    by_uuid = {uuid: index for index, uuid, _ in smi}
+    lines = []
+    for number, uuid, bus in cuda:
+        index = by_uuid.get(uuid)
+        text = f"CUDA device {number} is nvidia-smi GPU {index} ({uuid}, PCI {bus})"
+        if index is None:
+            lines.append(("WARN", f"CUDA device {number} ({uuid}, PCI {bus}) is not in nvidia-smi's list",
+                          "check the driver installation"))
+        elif str(number) == index:
+            lines.append(("PASS", text, ""))
+        elif visible is not None:
+            lines.append(("PASS", f"{text}; CUDA_VISIBLE_DEVICES={visible} selects it", ""))
+        else:
+            lines.append(("WARN", f"{text}: the numbers differ",
+                          "export CUDA_DEVICE_ORDER=PCI_BUS_ID, then CUDA uses nvidia-smi's numbers"))
+    return lines
+
+
+def check_gpu_numbers(cuda, smi):
+    if cuda is None:
+        return say("WARN", "CUDA device numbers not readable (libcuda.so.1)", "check the NVIDIA driver installation")
+    for level, text, fix in gpu_number_lines(cuda, smi, os.environ.get("CUDA_VISIBLE_DEVICES")):
+        say(level, text, fix)
 
 
 def check_one_gpu(index, name, total_gib, used_gib, cap):
@@ -336,7 +398,10 @@ def check_ram():
         say("WARN", f"only {avail * 1024:.0f} MB RAM available", f"setup's RAM guard stops the build under {min_mb} MB")
 
 
-def check_container_host(data):
+def check_container_host(driver_cuda):
+    if driver_cuda and driver_cuda < IMAGE_CUDA:
+        say("FAIL", f"the driver supports CUDA {driver_cuda[0]}.{driver_cuda[1]}; the container needs CUDA "
+                    f"{IMAGE_CUDA[0]}.{IMAGE_CUDA[1]} or newer", "update the NVIDIA driver")
     if not shutil.which("docker"):
         return say("FAIL", "docker not found", "install Docker Engine, or use the setup without a container")
     code, out = run(["docker", "info", "--format", "{{json .Runtimes}} {{.DockerRootDir}}"])
@@ -356,19 +421,44 @@ def check_container_host(data):
         say("WARN", f"Docker's disk at {root}: free space not readable as your user", "check it; the image size is not measured yet")
 
 
+def check_image_gpu_numbers(image, smi):
+    """Runs the image with all GPUs and compares its CUDA device numbers with the host's nvidia-smi numbers."""
+    code, out = run(["docker", "run", "--rm", "--gpus", "all", image, "python", "-I", "tools/preflight.py",
+                     "--cuda-devices"], timeout=300)
+    try:
+        cuda = json.loads(out.strip().splitlines()[-1]) if code == 0 else None
+    except (ValueError, IndexError):
+        cuda = None
+    if cuda is None:
+        last = out.strip().splitlines()[-1] if out and out.strip() else code
+        return say("FAIL", f"could not read the GPUs in {image}: {last}",
+                   "check: docker run --rm --gpus all " + image + " nvidia-smi")
+    for level, text, fix in gpu_number_lines(cuda, smi):
+        say(level, f"in {image}: {text.replace('nvidia-smi GPU', 'host GPU')}",
+            fix and "build the image again from this repository's Dockerfile (it sets CUDA_DEVICE_ORDER=PCI_BUS_ID)")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Check this machine before setup and before the first object.")
     ap.add_argument("--container", action="store_true", help="check the host of the container instead of a local setup")
     ap.add_argument("--data", default="data", help="--container: the folder you mount at /data (Hugging Face cache, weights)")
+    ap.add_argument("--image", help="--container: also run this image and check that its GPU numbers are the host's")
+    ap.add_argument("--cuda-devices", action="store_true", help="print only the CUDA devices as JSON (number, UUID, PCI bus id)")
     a = ap.parse_args()
+    if a.cuda_devices:
+        devices = cuda_devices()
+        print(json.dumps(devices))
+        return 0 if devices is not None else 1
     pins = pipeline_constants()
     check_os()
     if platform.system() != "Linux":
         return 1
-    driver_cuda = check_gpus()
+    driver_cuda, smi = check_gpus()
     check_ram()
     if a.container:
-        check_container_host(a.data)
+        check_container_host(driver_cuda)
+        if a.image:
+            check_image_gpu_numbers(a.image, smi)
         os.environ.setdefault("HF_HOME", os.path.join(a.data, "hf"))
         weights = os.path.join(a.data, "weights")
         have_weights = check_weights(weights, pins)
