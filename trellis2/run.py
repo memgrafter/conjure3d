@@ -261,8 +261,8 @@ def sha256(path):
 class BiRefNetCutout:
     """The pinned BiRefNet general model and the largest-piece rule. Weights stay on the host between props (one copy,
     persistent_offload); each cut-out moves them to the GPU and back."""
-    def __init__(self, src_root, torch):
-        self.torch = torch
+    def __init__(self, src_root, torch, device="cuda"):
+        self.torch, self.device = torch, device   # device: "cuda"; the Apple route (mac/run_mac.py) passes "mps" or "cpu"
         root = os.path.join(src_root, "ext", "BiRefNet")
         git = lambda *a: subprocess.run(["git", "-C", root, *a], capture_output=True, text=True, check=True).stdout.strip()
         if git("rev-parse", "HEAD") != BIREFNET_SHA or git("status", "--porcelain"):
@@ -309,9 +309,9 @@ class BiRefNetCutout:
         flags = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
         torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = False
         try:
-            self.model.to(torch.device("cuda"))
+            self.model.to(torch.device(self.device))
             with torch.no_grad():
-                pred = self.model(tf(img).unsqueeze(0).to("cuda"))[-1].sigmoid().float().cpu()[0, 0]
+                pred = self.model(tf(img).unsqueeze(0).to(self.device))[-1].sigmoid().float().cpu()[0, 0]
         finally:
             self.model.cpu()
             torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = flags
