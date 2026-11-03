@@ -8,6 +8,7 @@ how that download is pinned. It comes from one recorded build (below). Make the 
 
 One clean build on 2026-11-02 on an x86_64 Linux machine without a GPU (Docker 26.1): a new builder with an empty
 cache, `--no-cache --pull`, `TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0;10.0;12.0+PTX"`. The build finished (exit 0).
+A second clean build the same day, with 10.3 added to that list, contacted the same hosts for the same downloads.
 
 | Host | Port | What the build downloads there | Pinned |
 |---|---|---|---|
