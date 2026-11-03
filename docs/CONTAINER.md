@@ -40,10 +40,10 @@ RTX 3090 or 8.9 for an RTX 4090:
 docker build -t conjure3d:local --build-arg TORCH_CUDA_ARCH_LIST=8.6 .
 ```
 
-For all the GPUs in the table below (this is the build that was measured):
+For all the GPUs in the table below:
 
 ```sh
-docker build -t conjure3d:local --build-arg "TORCH_CUDA_ARCH_LIST=8.0;8.6;8.9;9.0;10.0;12.0+PTX" .
+docker build -t conjure3d:local --build-arg "TORCH_CUDA_ARCH_LIST=8.0;8.6;8.9;9.0;10.0;10.3;12.0+PTX" .
 ```
 
 - The compiled code runs on GPUs of the same major version and the same or a higher minor version: a build for 8.6
@@ -103,7 +103,7 @@ sm_121a and PTX for sm_80. Both cover each row.
 | 8.9 | RTX 4090, other RTX 40 cards, RTX 5000 Ada, RTX 6000 Ada, L4, L40S | sm_89 | built only |
 | 9.0 | H100, H200 | sm_90 | built only |
 | 10.0 | B200 | sm_100 | built only |
-| 10.3 | B300 | sm_100 (machine code runs on later minor versions of the same major version) | built only |
+| 10.3 | B300 | sm_103 | built, untested |
 | 12.0 | RTX 5090, 5080, 5070 Ti, 5070, 5060 Ti, 5060, 5050, RTX PRO 6000 Blackwell (Workstation and Server Editions) | sm_120 and PTX | built only |
 
 - 7.5 (T4, RTX 20 cards) is not in this build. CUDA 13 still supports it: add 7.5 to `TORCH_CUDA_ARCH_LIST`.
