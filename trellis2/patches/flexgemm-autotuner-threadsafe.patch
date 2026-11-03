@@ -1,0 +1,75 @@
+diff --git a/flex_gemm/utils/autotuner.py b/flex_gemm/utils/autotuner.py
+index ca95fc5..378c384 100644
+--- a/flex_gemm/utils/autotuner.py
++++ b/flex_gemm/utils/autotuner.py
+@@ -8,6 +8,8 @@ import torch
+ import triton
+ import time
+ import inspect
++import threading
++import functools
+ from filelock import FileLock
+ from .. import (
+     AUTOSAVE_AUTOTUNE_CACHE,
+@@ -15,6 +17,21 @@ from .. import (
+ )
+ 
+ 
++# Local patch (conjure3d patches/flexgemm-autotuner-threadsafe.patch): an autotuner keeps per-call state on the one
++# object every thread shares (TritonPersistentCacheAutotuner.nargs, the tuning caches), so two threads calling FlexGEMM
++# at once could use each other's arguments: a TypeError, or a kernel config chosen for another shape. Every call that
++# reads or writes that state holds one process-wide lock. Reentrant: the split-K autotuners call the Triton ones inside.
++_AUTOTUNE_LOCK = threading.RLock()
++
++
++def _one_thread_at_a_time(fn):
++    @functools.wraps(fn)
++    def locked(*args, **kwargs):
++        with _AUTOTUNE_LOCK:
++            return fn(*args, **kwargs)
++    return locked
++
++
+ class TritonPersistentCacheAutotuner(triton.runtime.Autotuner):
+     def __init__(
+         self,
+@@ -48,6 +65,7 @@ class TritonPersistentCacheAutotuner(triton.runtime.Autotuner):
+             do_bench,
+         )
+ 
++    @_one_thread_at_a_time
+     def run(self, *args, **kwargs):
+         self.nargs = dict(zip(self.arg_names, args))
+         used_cached_result = True
+@@ -111,6 +129,7 @@ class TritonPersistentCacheAutotuner(triton.runtime.Autotuner):
+                 pruned_configs = sorted(est_timing.keys(), key=lambda x: est_timing[x])[:top_k]
+         return pruned_configs
+ 
++    @_one_thread_at_a_time
+     def warmup(self, *args, **kwargs):
+         self.nargs = dict(zip(self.arg_names, args))
+         ret = []
+@@ -237,6 +256,7 @@ class PersistentCacheAutoTuner:
+         arg_dict.update(kwargs)
+         return arg_dict
+     
++    @_one_thread_at_a_time
+     def __call__(self, *args, **kwargs):
+         arg_dict = self._args_to_kwargs(args, kwargs)
+         
+@@ -344,6 +364,7 @@ def get_autotune_cache():
+     return cache
+ 
+ 
++@_one_thread_at_a_time
+ def save_autotune_cache(path=None):
+     path = path or AUTOTUNE_CACHE_PATH
+     lock_path = path + ".lock"
+@@ -365,6 +386,7 @@ def save_autotune_cache(path=None):
+         os.replace(tmp_path, path)
+ 
+ 
++@_one_thread_at_a_time
+ def load_autotune_cache(path_or_cache=None):
+     cache = None
+ 

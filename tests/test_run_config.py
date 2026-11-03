@@ -151,3 +151,22 @@ def test_chunk_norm_gives_the_unchunked_rows(monkeypatch):
     assert (LayerNorm32().forward(x) == want).all() and LayerNorm32.calls == [4, 4, 2]
     LayerNorm32.calls.clear()
     assert (LayerNorm32().forward(x[:4]) == want[:4]).all() and LayerNorm32.calls == [4]
+
+
+def test_inflight_defaults_to_one_object_at_a_time():
+    a = run.parse_args(["--job", "p:g:o", "--weights", "/w"])
+    assert a.inflight == 1 and a.offload == "persistent"
+    a = run.parse_args(["--job", "p:g:o", "--weights", "/w", "--offload", "resident", "--inflight", "2"])
+    assert (a.offload, a.inflight) == ("resident", 2)
+    assert run.parse_args(["--job", "p:g:o", "--weights", "/w", "--offload", "resident"]).inflight == 1
+
+
+@pytest.mark.parametrize("argv", [
+    ["--inflight", "2"],                                  # needs --offload resident
+    ["--inflight", "2", "--offload", "persistent"],
+    ["--inflight", "0", "--offload", "resident"],
+    ["--inflight", "2", "--offload", "resident", "--trace-decode", "t.jsonl"],
+])
+def test_inflight_bad_command_lines_stop(argv):
+    with pytest.raises(SystemExit):
+        run.parse_args(["--job", "p:g:o", "--weights", "/w", *argv])

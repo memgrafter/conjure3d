@@ -14,6 +14,7 @@ make or re-make an asset.
 - The input image, byte for byte.
 
 Changes that do not change output bytes: `--host-weights mapped|private`, `--offload persistent` (the default),
+`--offload resident` and `--inflight 2` (9 draft GLBs each on an RTX 3090, the same as one runner at a time),
 `--hash-stages`, `--save-mesh`, `--trace-decode` (6 GLBs on an RTX 3090 in the production pipeline), `--chunk-norm`
 and `--export-from` (below), `--profile`
 when it sets the same three values as the flags, warm runs (many objects in one process), the optional GPU and RAM
