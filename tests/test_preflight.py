@@ -82,3 +82,13 @@ def test_gpu_outside_the_arch_list_fails(monkeypatch, capsys):
     monkeypatch.setenv("TORCH_CUDA_ARCH_LIST", "8.6")
     preflight.check_one_gpu("0", "NVIDIA H100", 79.6, 0.0, "9.0")
     assert "FAIL  GPU 0: the CUDA code is built for TORCH_CUDA_ARCH_LIST=8.6" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("free, level", [(22.0, "PASS"), (7.0, "WARN")])
+def test_container_host_docker_disk(monkeypatch, capsys, free, level):
+    monkeypatch.setattr(preflight.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr(preflight, "run", lambda cmd: (0, '{"nvidia":{}} /var/lib/docker'))
+    monkeypatch.setattr(preflight, "free_gb", lambda path: free)
+    preflight.check_container_host((13, 3))
+    out = capsys.readouterr().out
+    assert f"{level}  Docker's disk at /var/lib/docker: {free:.1f} GB free; the image needs 14.9 GB there" in out

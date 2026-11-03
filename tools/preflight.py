@@ -20,6 +20,7 @@ TESTED = dict(nvcc="13.3", driver="610.43.02", gcc="14.2", uv="0.11.21", compute
 IMAGE_CUDA = (13, 3)                # the container's base image starts only with a driver for CUDA 13.3 or newer
 MIN_COMPUTE_CAP = 7.5               # CUDA 13 has no support for older GPUs (Maxwell, Pascal, Volta)
 RAM_TESTED_GIB = 30                 # the test machine has 31 GB
+IMAGE_GB = 14.9                     # the image with all GPU targets (docs/CONTAINER.md, measured build)
 RAM_ONE_RUNNER_GB = 19.4            # one runner: 3.6-6.4 GB plus 13 GB of memory-mapped weights (AGENTS.md "Memory")
 CONFIG_VARS = ("T2_VENV", "T2_SRC", "T2_WEIGHTS", "HF_HOME", "CUDA_HOME")
 
@@ -438,9 +439,15 @@ def check_container_host(driver_cuda):
         say("FAIL", "NVIDIA Container Toolkit not found", "install it, so that docker run --gpus all works")
     root = root.strip()
     try:
-        say("WARN", f"Docker's disk at {root}: {free_gb(root):.1f} GB free", "the image size is not measured yet")
+        free = free_gb(root)
     except OSError:
-        say("WARN", f"Docker's disk at {root}: free space not readable as your user", "check it; the image size is not measured yet")
+        return say("WARN", f"Docker's disk at {root}: free space not readable as your user",
+                   f"check it: the image needs {IMAGE_GB} GB there")
+    text = f"Docker's disk at {root}: {free:.1f} GB free; the image needs {IMAGE_GB} GB there"
+    if free < IMAGE_GB:
+        say("WARN", text, "free space there, unless the image is already loaded")
+    else:
+        say("PASS", text)
 
 
 def check_image_gpu_numbers(image, smi):
