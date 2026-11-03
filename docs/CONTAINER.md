@@ -66,28 +66,31 @@ docker build -t conjure3d:local --build-arg "TORCH_CUDA_ARCH_LIST=8.0;8.6;8.9;9.
 ### Measured build
 
 One clean build (`tools/build_netscan.sh`: new builder, empty cache, `--no-cache --pull`) on 2026-11-02 on a machine
-without a GPU, with `TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0;10.0;12.0+PTX"` and `MAX_JOBS=2`. The builder had 4 of
-the 6 CPU cores (Intel Core i5-8500T, 23 GB RAM) at the lowest CPU priority, because the machine did other work at
+without a GPU, with `TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0;10.0;10.3;12.0+PTX"` and `MAX_JOBS=2`. The builder had 4
+of the 6 CPU cores (Intel Core i5-8500T, 23 GB RAM) at the lowest CPU priority, because the machine did other work at
 the same time.
 
 | Step | Time |
 |---|---|
-| whole build, start to image in Docker | 79 min |
-| downloads, Ubuntu packages, venv | 9 min |
-| FlexGEMM, CuMesh, o-voxel (CUDA builds) | 13, 32 and 10 min |
-| export of the image and load into Docker | 15 min (a 2-minute pause included) |
+| whole build, start to image in Docker | 99 min |
+| downloads, Ubuntu packages, venv | 30 min (the downloads were slow; 9 min in an earlier build) |
+| FlexGEMM, CuMesh, o-voxel (CUDA builds) | 14, 33 and 10 min |
+| export of the image and load into Docker | 12 min |
 
 | Part of the image | Size |
 |---|---|
 | whole image | 14.9 GB |
-| layer of `setup.sh env` | 7.65 GB |
+| layer of `setup.sh env` | 7.67 GB |
 | venv (`/opt/conjure3d/venv-t2`) | 6.0 GB |
 | sources (`/opt/conjure3d/src`) | 1.2 GB |
 | Python (`/opt/conjure3d/python`) | 108 MB |
 
+An earlier build without 10.3 took 79 min, and its CUDA builds took 13, 32 and 10 min. Its image was 22 MB smaller.
+The sizes of the venv, the sources and Python are from that build.
+
 Checked in the image without a GPU (`cuobjdump --list-elf` and `--list-ptx`): FlexGEMM, CuMesh and o-voxel each have
-machine code for sm_80, sm_86, sm_89, sm_90, sm_100 and sm_120 in every CUDA object, and PTX for sm_120. CuMesh's
-xatlas library has no CUDA code. No cubvh library is in the image. Rust is not in the image.
+machine code for sm_80, sm_86, sm_89, sm_90, sm_100, sm_103 and sm_120 in every CUDA object, and PTX for sm_120.
+CuMesh's xatlas library has no CUDA code. No cubvh library is in the image. Rust is not in the image.
 
 ### GPUs
 
