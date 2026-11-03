@@ -132,6 +132,7 @@ below. Run the commands in the folder of this repository.
 
 2. Make the 3D environment. This compiles CUDA code and one Rust library, so it needs the CUDA 13 toolkit, g++,
    uv and Rust (cargo). To compile nothing on this machine, use the container: [docs/CONTAINER.md](docs/CONTAINER.md).
+   The container also runs on rented GPUs: [vast.ai](deploy/vast/README.md) and [Modal](deploy/modal/README.md).
 
    ```sh
    setsid -w bash trellis2/setup.sh env
