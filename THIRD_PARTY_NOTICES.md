@@ -141,6 +141,22 @@ Checked on 2026-11-01 in each project's own licence statement (the source named 
 | Rust toolchain (cargo, rustc) | `setup.sh env` builds trianglebvh with it | the Rust project: "generally dual-licensed" Apache-2.0 and MIT | rust-lang.org/policies/licenses |
 | bun (tested 1.4.4) | `web/` (the optional web export) | "Bun itself is MIT-licensed"; it statically links JavaScriptCore and WebKit (LGPL-2) and other parts listed in its `LICENSE.md` (MIT, BSD, Apache-2.0, LGPL-2.1 tinycc, others) | oven-sh/bun `LICENSE.md` (main branch) |
 
+## Apple Silicon route (`mac/setup_mac.sh`; experimental, docs/MAC.md)
+
+| Part | Pin | Licence | Checked in |
+|---|---|---|---|
+| trellis.cpp (pwilkin/trellis.cpp) | `c0bed38c` (v0.8.1) | MIT, Copyright (c) 2026 Piotr Wilkin | `LICENSE` at the pinned commit |
+| ggml (pwilkin/ggml, trellis.cpp's submodule) | `f8697b33` | MIT | `LICENSE` in the submodule |
+| xatlas, meshoptimizer, Fast-Quadric-Mesh-Simplification (vendored in trellis.cpp) | trellis.cpp's copies | MIT | the licence headers and `LICENSE.md` files in `thirdparty/` |
+| stb (vendored in trellis.cpp) | trellis.cpp's copy | public domain or MIT (your choice) | the end of each header |
+| gguf (Python, writes the GGUF files) | 0.19.0 | MIT | package metadata |
+| `mac/requirements.txt` packages not listed above: anyio 4.16.0, h11 0.16.0, truststore 0.10.5 (MIT); click 8.5.0, httpcore2 2.16.0, httpx2 2.16.0 (BSD-3-Clause) | as listed | as listed | package metadata |
+
+trellis.cpp's post-processing (remesh, QEM simplification, xatlas unwrap, bake, BVH) was read at the pinned commit
+for non-commercial parts: none found (docs/MAC.md, Licences). `setup_mac.sh` does not build its optional quad
+retopology, which would download CGAL (GPL-3.0 or LGPL-3.0 by package), Boost and LEMON (Boost Software License),
+GMP (LGPL-3.0 or GPL-2.0) and MPFR (LGPL-3.0).
+
 ## Tools called as external programs (optional; not shipped, not linked)
 
 | Tool | Used for | Licence | Checked in |

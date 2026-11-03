@@ -271,7 +271,7 @@ def process(pid, p, od, dry, extras_key=EXTRAS_KEY):
         chk["passed"] = all(v for k, v in chk.items() if k != "trimesh_bounds_m")
         rec.update(output=dict(file="asset.glb", md5=md5(dst), bytes=os.path.getsize(dst)), checks=chk)
     rec["seconds"] = round(time.time() - t0, 1)
-    rec["peak_rss_mb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1)
+    rec["peak_rss_mb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2 if sys.platform == "darwin" else 1024), 1)  # bytes on macOS, KiB on Linux
     if not dry:
         with open(os.path.join(od, "asset.json"), "w") as f:
             json.dump(rec, f, indent=1)
@@ -295,6 +295,13 @@ LICENCES = {
     "BiRefNet cut-out code and weights": "MIT",
     "CuMesh (built without cubvh), FlexGEMM, o-voxel, utils3d": "MIT",
     "uvrast (texture bake), trianglebvh (BVH)": "MIT",
+}
+LICENCES_TRELLIS_CPP = {   # the Apple Silicon route (mac/run_mac.py): trellis.cpp replaces TRELLIS.2's code and CUDA parts
+    "TRELLIS.2-4B weights (converted to GGUF)": "MIT",
+    "TRELLIS-image-large sparse-structure decoder": "MIT",
+    "DINOv3 ViT-L/16 image features": "DINOv3 License (conditions: THIRD_PARTY_NOTICES.md)",
+    "BiRefNet cut-out code and weights": "MIT",
+    "trellis.cpp (with ggml, xatlas, meshoptimizer, Fast-Quadric-Mesh-Simplification, stb)": "MIT",
 }
 
 
@@ -335,6 +342,13 @@ def object_record(pid, p, asset, run_rec, pins):
                          remesh=pick(r.get("remesh"), "mode", "sha256")),
                outputs_md5={"asset.glb": asset["output"]["md5"], "raw.glb": asset["input"]["md5"]},
                licences=LICENCES)
+    if r.get("backend") == "trellis-cpp":
+        tc = r.get("trellis_cpp") or {}
+        obj.update(backend="trellis-cpp (Apple Silicon, experimental, not byte-identical to the CUDA route)",
+                   licences=LICENCES_TRELLIS_CPP)
+        obj["pins"] = dict(trellis2_weights=r.get("model"), trellis_cpp=pick(tc, "repo", "commit", "ggml_commit"),
+                           gguf_sha256_12={k: v["sha256"][:12] for k, v in sorted((r.get("gguf") or {}).items())},
+                           birefnet=pick(r.get("cutout"), "code", "weights"))
     return obj
 
 

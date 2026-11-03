@@ -16,6 +16,9 @@ the same bytes as a plain run.py run with the same image and seed. draft: 512 pi
 "-chunk-norm". Out of GPU memory with clean: --on-oom stop (default) prints the --chunk-norm command (when the
 generation ran out and --chunk-norm was not used) and the draft command; --on-oom draft makes the draft at once in its
 own folder. Python 3.8 or newer, standard library only; run.py and the post step run in $T2_VENV.
+--backend trellis-cpp: the Apple Silicon route (EXPERIMENTAL, not production, not byte-identical to the CUDA route):
+mac/run_mac.py (the same BiRefNet cut-out on MPS, then trellis.cpp with Metal) and the same post step, both in
+$MAC_VENV; profiles draft and clean only; folder OUT/<id>-<profile>-trellis-cpp-seed<N>/. See docs/MAC.md.
 """
 import argparse, importlib.util, json, os, re, shlex, signal, subprocess, sys, time
 
@@ -24,6 +27,8 @@ PROFILES = ("clean", "draft", "best")   # run.py --profile; the settings are run
 RUN_ENV = {"HF_HUB_OFFLINE": "1", "ATTN_BACKEND": "xformers", "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}
 EXIT_OK, EXIT_ERROR, EXIT_OOM = 0, 1, 3
 CHUNK_NORM_ROWS = 1048576   # the row count proven byte-identical (docs/LOW_VRAM.md)
+MAC_ENV = {"HF_HUB_OFFLINE": "1"}
+MAC_PROFILES = ("clean", "draft")   # mac/run_mac.py PROFILES
 
 
 class Stop(Exception):
@@ -43,7 +48,13 @@ def parse_args(argv=None):
                     help="if clean runs out of GPU memory: stop and print the draft command (default), or make a draft")
     ap.add_argument("--chunk-norm", action="store_true",
                     help="run.py --chunk-norm: lower GPU peak in the decoders, same files; for a clean run that ran out of memory")
+    ap.add_argument("--backend", default="cuda", choices=["cuda", "trellis-cpp"],
+                    help="cuda (default: Linux, NVIDIA) or trellis-cpp (Apple Silicon, experimental; docs/MAC.md)")
     a = ap.parse_args(argv)
+    if a.backend == "trellis-cpp" and a.profile not in MAC_PROFILES:
+        ap.error(f"--backend trellis-cpp supports --profile {' or '.join(MAC_PROFILES)}")
+    if a.backend == "trellis-cpp" and a.chunk_norm:
+        ap.error("--chunk-norm is for the CUDA route (trellis.cpp has no such option)")
     if not a.size_m > 0:
         ap.error("SIZE_M must be more than 0 (metres)")
     a.image, a.out = os.path.abspath(a.image), os.path.abspath(a.out)
@@ -85,6 +96,20 @@ def check_setup(profile):
     return python
 
 
+def check_setup_mac():
+    """The Apple route: stops with a plain message if mac/setup_mac.sh (build, env, gguf) is not finished."""
+    names = ("MAC_VENV", "TRELLIS_CPP_HOME", "TRELLIS_GGUF", "T2_SRC", "HF_HOME")
+    missing = [v for v in names if not os.environ.get(v)]
+    if missing:
+        raise Stop(f"not set: {' '.join(missing)}. Run: source config.env (see docs/MAC.md)")
+    python = os.path.join(os.environ["MAC_VENV"], "bin", "python")
+    for path, step in ((python, "env"), (os.path.join(os.environ["TRELLIS_CPP_HOME"], "build", "trellis-cli"), "build"),
+                       (os.path.join(os.environ["TRELLIS_GGUF"], "manifest.json"), "gguf")):
+        if not os.path.isfile(path):
+            raise Stop(f"no {path}. Run: bash mac/setup_mac.sh {step} (docs/MAC.md)")
+    return python
+
+
 def write_props(job, a):
     prop = dict(gold=os.path.basename(a.image), size_m=a.size_m)
     if a.lie_flat:
@@ -120,7 +145,8 @@ def oom_file(od):
 
 def make(a, profile, python):
     """Runs run.py and the post step for one profile. Returns (asset.glb path or None, OOM file or None, job folder)."""
-    job = os.path.join(a.out, f"{a.id}-{profile}{'-chunk-norm' if a.chunk_norm else ''}-seed{a.seed}")
+    mac = a.backend == "trellis-cpp"
+    job = os.path.join(a.out, f"{a.id}-{profile}{'-chunk-norm' if a.chunk_norm else ''}{'-trellis-cpp' if mac else ''}-seed{a.seed}")
     for path in (os.path.dirname(a.image), job):
         if ":" in path:
             raise Stop(f"{path}: run.py's --job cannot read a ':' in a path; move or rename it")
@@ -129,12 +155,13 @@ def make(a, profile, python):
     os.makedirs(job)
     props = write_props(job, a)
     od = os.path.join(job, a.id)
-    run_cmd = [python, "-I", os.path.join(ROOT, "trellis2", "run.py"), "--job", f"{props}:{os.path.dirname(a.image)}:{job}",
+    runner = os.path.join(ROOT, "mac", "run_mac.py") if mac else os.path.join(ROOT, "trellis2", "run.py")
+    run_cmd = [python, "-I", runner, "--job", f"{props}:{os.path.dirname(a.image)}:{job}",
                "--only", a.id, "--seed", str(a.seed), "--profile", profile]
     if a.chunk_norm:
         run_cmd += ["--chunk-norm", str(CHUNK_NORM_ROWS)]
     t0 = time.time()
-    code = tee(run_cmd, os.path.join(job, "run.log"), env=dict(os.environ, **RUN_ENV))
+    code = tee(run_cmd, os.path.join(job, "run.log"), env=dict(os.environ, **(MAC_ENV if mac else RUN_ENV)))
     run_s = time.time() - t0
     if not os.path.isfile(os.path.join(od, "raw.glb")):
         oom = oom_file(od)
@@ -161,7 +188,11 @@ def report(a, profile, od, run_s, post_s):
     print(f"\nDONE  {os.path.join(od, 'asset.glb')}")
     print(f"      profile {profile}, seed {a.seed}, longest side {a.size_m} m, pose {info['pose']['chosen']}, "
           f"GPU {rec['gpu']}")
-    print(f"      time: 3D {run_s:.0f} s (model load {rec['load']['load_s']:.0f} s included), post step {post_s:.0f} s")
+    if rec.get("backend") == "trellis-cpp":
+        print(f"      time: 3D {run_s:.0f} s (trellis.cpp {rec['seconds']['trellis_cpp_wall']:.0f} s), post step {post_s:.0f} s")
+        print("NOTE  Apple Silicon route (trellis.cpp): experimental, not production, not byte-identical to the CUDA route.")
+    else:
+        print(f"      time: 3D {run_s:.0f} s (model load {rec['load']['load_s']:.0f} s included), post step {post_s:.0f} s")
     if rec.get("export_note", "as configured") != "as configured":
         print("WARN  the GLB export ran out of GPU memory once and was made again from a simplified mesh. This file "
               "cannot be made again byte for byte from the image and seed (record.json, export_note).")
@@ -183,7 +214,7 @@ def main(argv=None):
     try:
         if not os.path.isfile(a.image):
             raise Stop(f"no image at {a.image}")
-        python = check_setup(a.profile)
+        python = check_setup_mac() if a.backend == "trellis-cpp" else check_setup(a.profile)
         asset, oom, job = make(a, a.profile, python)
         if not oom:
             return EXIT_OK
@@ -192,10 +223,10 @@ def main(argv=None):
             print("Close other programs that use the GPU, or use a GPU with more memory (docs/LOW_VRAM.md).")
             return EXIT_OOM
         same = [sys.executable, "-I", os.path.abspath(__file__), a.image, str(a.size_m), "--seed", str(a.seed), "--out", a.out,
-                "--id", a.id] + (["--lie-flat"] if a.lie_flat else [])
+                "--id", a.id] + (["--lie-flat"] if a.lie_flat else []) + (["--backend", a.backend] if a.backend != "cuda" else [])
         draft = same + ["--profile", "draft"]
         if a.on_oom == "stop":
-            if not a.chunk_norm and not oom.endswith("oom-glb.json"):
+            if a.backend == "cuda" and not a.chunk_norm and not oom.endswith("oom-glb.json"):
                 print("--chunk-norm lowers the GPU peak in generation and gives the same files. With a 15.70 GiB limit it "
                       "made 3 of 4 objects that ran out of memory without it (docs/LOW_VRAM.md). To try it first:\n  "
                       f"{shlex.join(same + ['--chunk-norm'])}")
@@ -204,7 +235,8 @@ def main(argv=None):
             return EXIT_OOM
         print("You asked for a draft on out-of-memory (--on-oom draft). Making a draft now: rougher surface, different "
               f"files, in its own folder. The clean attempt stays in {job}.\n", flush=True)
-        check_setup("draft")
+        if a.backend == "cuda":
+            check_setup("draft")
         a.chunk_norm = False   # the draft is the same command as the printed one
         asset, oom, _ = make(a, "draft", python)
         if oom:

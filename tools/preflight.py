@@ -48,6 +48,9 @@ def pipeline_constants():
 
 def check_os():
     system, machine = platform.system(), platform.machine()
+    if system == "Darwin" and machine == "arm64":
+        return say("WARN", f"macOS on Apple Silicon: the CUDA route does not run here",
+                   "the Apple route (trellis.cpp, experimental, not production) can: docs/MAC.md; checks below")
     if system != "Linux":
         return say("FAIL", f"operating system: {system}", "use Linux; Windows and macOS are not supported")
     if machine != "x86_64":
@@ -421,6 +424,34 @@ def check_ram():
         say("WARN", f"only {avail * 1024:.0f} MB RAM available", f"setup's RAM guard stops the build under {min_mb} MB")
 
 
+def check_mac():
+    """The Apple route (docs/MAC.md): build tools, then what mac/setup_mac.sh made. Reads only."""
+    mem = run(["sysctl", "-n", "hw.memsize"])[1].strip()
+    gib = int(mem) / GIB if mem.isdigit() else 0
+    chip = run(["sysctl", "-n", "machdep.cpu.brand_string"])[1].strip()
+    say("PASS" if gib >= 24 else "WARN", f"{chip}, {gib:.0f} GiB unified memory (shared by the CPU and the GPU)",
+        "" if gib >= 24 else "only 24 GiB is tested (docs/MAC.md, Measured)")
+    for tool in ("cmake", "git", os.environ.get("UV", "uv")):
+        say("PASS" if shutil.which(tool) else "FAIL", f"{tool}: {shutil.which(tool) or 'not found'}",
+            "" if shutil.which(tool) else f"install {tool} (Homebrew)")
+    code, dev = run(["xcode-select", "-p"])
+    sdk = os.path.join(dev.strip(), "Platforms", "MacOSX.platform", "Developer", "SDKs", "MacOSX.sdk")
+    say("PASS" if code == 0 and os.path.isdir(sdk) else "FAIL", f"Xcode macOS SDK: {sdk if code == 0 else dev.strip()}",
+        "" if code == 0 and os.path.isdir(sdk) else "install Xcode and run xcode-select -s")
+    names = ("MAC_VENV", "TRELLIS_CPP_HOME", "TRELLIS_GGUF", "T2_SRC", "T2_WEIGHTS", "HF_HOME")
+    missing = [v for v in names if not os.environ.get(v)]
+    if missing:
+        return say("FAIL", f"not set: {' '.join(missing)}", "edit config.env (Apple block of config.example.env), source it")
+    env = os.environ
+    for path, step in ((os.path.join(env["TRELLIS_CPP_HOME"], "build", "trellis-cli"), "build"),
+                       (os.path.join(env["MAC_VENV"], "bin", "python"), "env"),
+                       (os.path.join(env["T2_SRC"], "ext", "BiRefNet"), "env"),
+                       (os.path.join(env["TRELLIS_GGUF"], "manifest.json"), "gguf")):
+        ok = os.path.exists(path)
+        say("PASS" if ok else "WARN", f"{path}: {'present' if ok else 'missing'}", "" if ok else f"bash mac/setup_mac.sh {step}")
+    say("PASS", "Apple route: python3 -I conjure3d.py IMAGE SIZE_M --backend trellis-cpp [--profile draft|clean]  (docs/MAC.md)")
+
+
 def check_container_host(driver_cuda):
     if driver_cuda and driver_cuda < IMAGE_CUDA:
         say("FAIL", f"the driver supports CUDA {driver_cuda[0]}.{driver_cuda[1]}; the container needs CUDA "
@@ -480,8 +511,14 @@ def main():
         return 0 if devices is not None else 1
     pins = pipeline_constants()
     check_os()
-    if platform.system() != "Linux":
+    if platform.system() == "Darwin" and platform.machine() == "arm64" and not a.container:
+        check_mac()
+    elif platform.system() != "Linux":
         return 1
+    if platform.system() != "Linux":
+        fails, warns = results.count("FAIL"), results.count("WARN")
+        print(f"\n{fails} FAIL, {warns} WARN, {results.count('PASS')} PASS")
+        return 1 if fails else 0
     driver_cuda, smi = check_gpus()
     check_ram()
     if a.container:
