@@ -83,7 +83,8 @@ Hard objects on an RTX 3090 / 3090 Ti at 275 W (warm process, model load of 33-6
 - Linux and NVIDIA only (CUDA 13 build). Only one machine was tested; other GPUs, drivers and CUDA versions are
   untested. Some very detailed objects run out of memory even on 24 GB.
 - Apple Silicon: an experimental route with trellis.cpp on Metal (`conjure3d.py --backend trellis-cpp`,
-  [docs/MAC.md](docs/MAC.md)). Not production, and not the same files as the CUDA route.
+  [docs/MAC.md](docs/MAC.md)). Not production, and not the same files as the CUDA route. Its GGUF weights are on
+  Hugging Face: [Conjure3D for Apple Silicon](https://huggingface.co/collections/memgrafter/conjure3d-for-apple-silicon-6aeadc5bbdcd3bc174f7c4b4).
 
 ## Measured
 

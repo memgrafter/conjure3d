@@ -21,18 +21,50 @@ source config.env
 python3 -I tools/preflight.py      # prints the Apple route checks
 bash mac/setup_mac.sh build        # trellis.cpp at its pinned commit, Metal, PNG textures
 bash mac/setup_mac.sh env          # $MAC_VENV and the pinned BiRefNet code
-# weights: the same pinned files as Linux in $T2_WEIGHTS, and BiRefNet in $HF_HOME (see below)
-bash mac/setup_mac.sh gguf         # checks every SHA-256, converts to $TRELLIS_GGUF
+# weights: way A or way B below
 python3 -I conjure3d.py IMAGE SIZE_M --backend trellis-cpp --profile draft
 ```
 
 - Needs: macOS on Apple Silicon, Xcode (its macOS SDK), cmake, git, uv. No sudo.
-- Weights: `T2_VENV=$MAC_VENV bash trellis2/setup.sh weights` downloads them as on Linux (not tested on a Mac). The
-  test machine got a checked copy of `$T2_WEIGHTS` from another machine instead; `setup_mac.sh gguf` checks every
-  SHA-256 against `run.py`'s pins either way.
+- Disk: GGUF files 16 GB, `$MAC_VENV` 0.9 GB, trellis.cpp source and build 0.3 GB.
+
+### Weights, way A: ready-made GGUF files from Hugging Face
+
+The GGUF files that way B makes are on Hugging Face (collection
+[Conjure3D for Apple Silicon](https://huggingface.co/collections/memgrafter/conjure3d-for-apple-silicon-6aeadc5bbdcd3bc174f7c4b4)).
+No conversion and no TRELLIS.2 download. DINOv3 is in a gated repository: open
+https://huggingface.co/memgrafter/conjure3d-mac-dinov3-gguf with your own account, read the DINOv3 License and accept
+it if you agree. Then:
+
+```sh
+source config.env
+$MAC_VENV/bin/hf auth login
+$MAC_VENV/bin/hf download memgrafter/conjure3d-mac-gguf --local-dir "$TRELLIS_GGUF" --exclude birefnet.gguf
+$MAC_VENV/bin/hf download memgrafter/conjure3d-mac-dinov3-gguf --local-dir "$TRELLIS_GGUF"
+cp "$TRELLIS_GGUF/LICENSE.md" "$TRELLIS_GGUF/DINOv3-LICENSE.md"   # the run looks for this name
+# the cut-out's BiRefNet weights, at run.py's pin, into $HF_HOME
+$MAC_VENV/bin/hf download ZhengPeng7/BiRefNet model.safetensors README.md --revision e2bf8e4460fc8fa32bba5ea4d94b3233d367b0e4
+shasum -a 256 "$HF_HOME/hub/models--ZhengPeng7--BiRefNet/snapshots/e2bf8e4460fc8fa32bba5ea4d94b3233d367b0e4/model.safetensors"
+# must be 9ab37426bf4de0567af6b5d21b16151357149139362e6e8992021b8ce356a154
+```
+
+- Each run checks every GGUF file it loads against the SHA-256 in `manifest.json`, and stops if one is missing or
+  different.
+- `birefnet.gguf` is not used: the cut-out runs the PyTorch BiRefNet on MPS (step 1 above).
+- Download: 15.6 GB.
+
+### Weights, way B: convert the pinned weights yourself
+
+```sh
+# the same pinned files as Linux in $T2_WEIGHTS, and BiRefNet in $HF_HOME
+bash mac/setup_mac.sh gguf         # checks every SHA-256, converts to $TRELLIS_GGUF
+```
+
+- `T2_VENV=$MAC_VENV bash trellis2/setup.sh weights` downloads them as on Linux (not tested on a Mac). The test
+  machine got a checked copy of `$T2_WEIGHTS` from another machine instead; `setup_mac.sh gguf` checks every SHA-256
+  against `run.py`'s pins either way.
 - DINOv3: its licence applies to the GGUF copy too. `DINOv3-LICENSE.md` is copied next to the GGUF files, and the run
   stops without it.
-- Disk: GGUF files 16 GB, `$MAC_VENV` 0.9 GB, trellis.cpp source and build 0.3 GB.
 
 ## Profiles
 
